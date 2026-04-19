@@ -74,7 +74,15 @@ def _summary(values: list[float] | list[int]) -> dict[str, float]:
 
 
 def _build_env(cfg: TrainConfig, seed: int, client: GameClient | None = None):
-    return make_env(cfg.env, cfg.vision, cfg.reward, seed=seed, idx=0, client=client)()
+    return make_env(
+        cfg.env,
+        cfg.vision,
+        cfg.reward,
+        seed=seed,
+        idx=0,
+        client=client,
+        randomization_cfg=cfg.randomization,
+    )()
 
 
 def _build_live_client(cfg: TrainConfig, live_cfg: LiveConfig) -> GameClient:

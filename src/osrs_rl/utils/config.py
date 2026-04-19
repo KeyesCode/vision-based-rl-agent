@@ -51,6 +51,30 @@ class RewardConfig:
 
 
 @dataclass
+class RandomizationConfig:
+    """Visual domain randomization for the simulator.
+
+    Every field defaults to the no-op value, so ``RandomizationConfig(enabled=True)``
+    alone changes nothing — randomization is opt-in per-family. This lets you ablate
+    any single knob without touching the others.
+
+    All jitter ranges are one-sided (``uniform(-j, j)``). Per-episode fields are
+    sampled once in ``reset()``; per-frame fields are sampled every ``render()``.
+    """
+
+    enabled: bool = False
+    # --- Per-episode ---
+    color_jitter: float = 0.0        # 0..1; fraction of 255 added as uniform RGB noise per channel
+    clutter_density: float = 0.0     # 0..1; fraction of empty tiles painted with distractor colors
+    tree_size_jitter: int = 0        # pixels; trees randomly shrink by 0..N from each side
+    hud_randomize_side: bool = False # if True, HUD bar randomly placed at top or bottom
+    # --- Per-frame ---
+    brightness_jitter: float = 0.0   # multiplicative scale in (1-j, 1+j)
+    contrast_jitter: float = 0.0     # multiplicative contrast in (1-j, 1+j) around mid-gray
+    pixel_noise_std: float = 0.0     # stddev of additive Gaussian noise (in 0..255 scale)
+
+
+@dataclass
 class PPOConfig:
     """PPO hyperparameters (defaults tuned for laptop CPU MVP)."""
 
@@ -118,6 +142,7 @@ class TrainConfig:
     env: EnvConfig = field(default_factory=EnvConfig)
     vision: VisionConfig = field(default_factory=VisionConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
+    randomization: RandomizationConfig = field(default_factory=RandomizationConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 

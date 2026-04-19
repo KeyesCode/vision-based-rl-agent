@@ -72,14 +72,26 @@ class Trainer:
 
     def _build_envs(self) -> SyncVectorEnv:
         thunks = [
-            make_env(self.cfg.env, self.cfg.vision, self.cfg.reward, self.cfg.seed, i)
+            make_env(
+                self.cfg.env,
+                self.cfg.vision,
+                self.cfg.reward,
+                self.cfg.seed,
+                i,
+                randomization_cfg=self.cfg.randomization,
+            )
             for i in range(self.cfg.ppo.num_envs)
         ]
         return SyncVectorEnv(thunks)
 
     def _build_eval_env(self) -> gym.Env:
         return make_env(
-            self.cfg.env, self.cfg.vision, self.cfg.reward, self.cfg.seed + 10_000, 0
+            self.cfg.env,
+            self.cfg.vision,
+            self.cfg.reward,
+            self.cfg.seed + 10_000,
+            0,
+            randomization_cfg=self.cfg.randomization,
         )()
 
     # ----------------------------------------------------------------- main loop

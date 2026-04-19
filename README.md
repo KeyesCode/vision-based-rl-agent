@@ -205,19 +205,114 @@ osrs-eval --checkpoint runs/ppo_woodcutting_v2/checkpoints/latest.pt \
 macOS users: `mss` needs Screen Recording permission and `pynput` needs Accessibility
 permission for the terminal (System Settings → Privacy & Security).
 
+## Domain randomization (sim-to-real preparation)
+
+The single biggest obstacle to moving a simulator-trained vision policy onto real
+OSRS frames is that it has memorized the exact pixel statistics of one renderer.
+Domain randomization attacks that directly: every episode, the simulator re-samples
+visual dimensions the policy *should* ignore, forcing the CNN to learn features that
+are invariant to that noise.
+
+**What gets randomized** (all behind independent config flags, zero-valued = no-op):
+
+| family | per-episode | what it perturbs |
+|---|:-:|---|
+| palette jitter | ✔ | grass / tree / stump / agent / HUD colors (RGB offset) |
+| HUD side | ✔ | inventory bar flips between top and bottom of the frame |
+| distractor clutter | ✔ | random decorative tiles (not trees) scattered on empty ground |
+| tree-size jitter | ✔ | tree sprites randomly shrink by a few pixels per side |
+| brightness jitter | — | per-frame multiplicative brightness |
+| contrast jitter | — | per-frame multiplicative contrast around mid-gray |
+| pixel noise | — | per-frame additive Gaussian noise |
+
+![dr samples](docs/results/dr_samples.png)
+
+Same task — find and chop trees — but every one of those frames looks different.
+
+### Experiment: baseline policy vs domain-randomized policy
+
+Two identical training runs (300k steps, same seed, same hyperparameters) — the only
+delta is the `randomization` block. Each policy was then evaluated on both the
+baseline simulator and the randomized simulator over 30 episodes.
+
+![robustness](docs/results/robustness.png)
+
+| eval env | **baseline policy** | **DR-trained policy** | delta |
+|---|---|---|---|
+| return on baseline sim | +18.04 | **+21.51** | **+3.5 pts** |
+| return on randomized sim | +16.89 | **+18.48** | **+1.6 pts** |
+| success rate on baseline sim | 4.0% | **10.0%** | **+6 pp** |
+| success rate on randomized sim | **0.0%** | **6.7%** | **+6.7 pp** |
+| trees chopped / ep (randomized sim) | 3.90 | 3.80 | ≈ |
+
+Two readings worth making explicit:
+
+1. **DR acts as a regularizer.** The DR-trained policy is the best policy on *both*
+   environments, including the undisturbed baseline it was never trained on directly.
+   This is a well-known phenomenon in autonomy research — forcing invariance often
+   improves in-distribution performance too, because the policy stops latching onto
+   spurious pixel-level features.
+2. **The success-rate panel is the clean win.** The baseline policy's success rate
+   collapses from 4% to 0% the moment the visuals are perturbed; the DR policy holds
+   at 6.7%. This is exactly the kind of robustness gap that determines whether a
+   sim-trained policy survives transfer to a new renderer (or real OSRS).
+
+### Reproduce
+
+```bash
+# Train the domain-randomized policy (~5 min on CPU, num_envs=8)
+osrs-train --config configs/ppo_woodcutting_dr.yaml
+
+# Render a 3×3 sampler of randomized frames (shown above)
+python scripts/render_dr_samples.py \
+    --config configs/ppo_woodcutting_dr.yaml \
+    --output docs/results/dr_samples.png
+
+# Cross-eval (2×2 matrix)
+osrs-eval --checkpoint runs/ppo_woodcutting_v2/checkpoints/latest.pt \
+          --config configs/ppo_woodcutting_dr.yaml --episodes 30 \
+          --output runs/robustness/v2_on_dr.json
+osrs-eval --checkpoint runs/ppo_woodcutting_dr/checkpoints/latest.pt \
+          --config configs/ppo_woodcutting.yaml --episodes 30 \
+          --output runs/robustness/dr_on_baseline.json
+osrs-eval --checkpoint runs/ppo_woodcutting_dr/checkpoints/latest.pt \
+          --config configs/ppo_woodcutting_dr.yaml --episodes 30 \
+          --output runs/robustness/dr_on_dr.json
+
+# Render the robustness chart
+python scripts/compare_robustness.py \
+    --baseline-on-baseline runs/ppo_woodcutting_v2/eval_trained.json \
+    --baseline-on-dr       runs/robustness/v2_on_dr.json \
+    --dr-on-baseline       runs/robustness/dr_on_baseline.json \
+    --dr-on-dr             runs/robustness/dr_on_dr.json \
+    --output docs/results/robustness.png
+```
+
+### Honest caveats
+
+- **Randomized-sim performance is a proxy, not a verdict on real OSRS.** The DR
+  simulator still produces clean tiled frames; real OSRS has text, menus, NPCs, and
+  lighting that none of the randomization families capture.
+- **The distractor clutter palette is hand-chosen.** A harder distractor set (e.g.,
+  tree-colored noise tiles) would reduce the robustness margin.
+- **Success rate is still low in absolute terms** (6.7% for the DR policy on DR sim).
+  The bottleneck is still the argmax-collapse issue documented in [Limitations](#limitations)
+  — DR improves robustness without solving the representation problem, which is what
+  the next milestone (recurrent policy) targets.
+
 ## Next steps: sim-to-real
 
-Closing the visual-domain gap is the natural next milestone. In priority order:
+Domain randomization (above) is the first of these to land. In priority order, the
+remaining sim-to-real levers:
 
-1. **Domain randomization in the simulator** — randomize tile sizes, colors, HUD
-   position, lighting noise, clutter. Train the policy to be invariant to the exact
-   pixel statistics of any single renderer.
-2. **Recurrent policy head (GRU/LSTM).** Addresses the representation bottleneck
+1. **Recurrent policy head (GRU/LSTM).** Addresses the representation bottleneck
    directly by giving the policy multi-frame memory — which tree am I walking toward,
-   is the chop animation still running.
-3. **Real-frame fine-tuning.** Collect a few hundred labeled OSRS screenshots
+   is the chop animation still running. Closes the argmax-collapse gap.
+2. **Real-frame fine-tuning.** Collect a few hundred labeled OSRS screenshots
    (tree / no-tree, adjacent / not), add a lightweight supervised aux-loss on the CNN
    backbone during PPO training so the visual features transfer.
+3. **Harder distractor clutter.** Add distractors shaped like trees-with-wrong-color
+   and trees-with-wrong-size to force the CNN to use shape features, not just color.
 4. **CV-based action decoder.** Instead of a naive virtual cursor, have the live
    client detect tree pixels and expose a "click nearest tree" macro as an action —
    the policy then only has to choose _when_, not _where_.
@@ -230,7 +325,8 @@ Closing the visual-domain gap is the natural next milestone. In priority order:
 - [x] Evaluation harness, random baseline, progression plots, action-distribution chart
 - [x] Live OSRS client with safety-gated input and dry-run by default
 - [x] CI (GitHub Actions) + architecture diagram + README polish
-- [ ] Domain randomization + recurrent policy
+- [x] Domain randomization (palette / HUD / clutter / per-frame noise) + robustness ablation
+- [ ] Recurrent policy head (GRU/LSTM)
 - [ ] DQN baseline behind the same `BasePolicy` interface
 - [ ] Second task (combat? mining?) as generalization test
 
