@@ -97,6 +97,10 @@ class PPOConfig:
     # --- Recurrent PPO (LSTM head on top of the CNN encoder) ---
     recurrent: bool = False
     lstm_hidden_size: int = 256
+    # --- Adjacency auxiliary loss ---
+    # Weight on the BCE loss that predicts "adjacent to an alive tree" from CNN
+    # features. 0.0 disables the aux loss entirely (aux head is unused).
+    aux_adjacency_coef: float = 0.0
 
 
 @dataclass

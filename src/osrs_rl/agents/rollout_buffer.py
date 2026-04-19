@@ -33,6 +33,10 @@ class RolloutBuffer:
         self.dones = torch.zeros((self.T, self.N), device=device)
         self.values = torch.zeros((self.T, self.N), device=device)
 
+        # Per-step supervised target for the adjacency auxiliary loss. 0.0 when the
+        # aux loss is disabled in config (the buffer just stays zeroed).
+        self.adjacency = torch.zeros((self.T, self.N), device=device)
+
         self.advantages = torch.zeros((self.T, self.N), device=device)
         self.returns = torch.zeros((self.T, self.N), device=device)
 
@@ -46,6 +50,7 @@ class RolloutBuffer:
         reward: np.ndarray | torch.Tensor,
         done: np.ndarray | torch.Tensor,
         value: torch.Tensor,
+        adjacency: np.ndarray | torch.Tensor | None = None,
     ) -> None:
         t = self._step
         self.obs[t] = obs
@@ -54,6 +59,10 @@ class RolloutBuffer:
         self.rewards[t] = torch.as_tensor(reward, dtype=torch.float32, device=self.device)
         self.dones[t] = torch.as_tensor(done, dtype=torch.float32, device=self.device)
         self.values[t] = value
+        if adjacency is not None:
+            self.adjacency[t] = torch.as_tensor(
+                adjacency, dtype=torch.float32, device=self.device
+            )
         self._step += 1
 
     def full(self) -> bool:
@@ -92,6 +101,7 @@ class RolloutBuffer:
             "advantages": self.advantages.reshape(-1),
             "returns": self.returns.reshape(-1),
             "values": self.values.reshape(-1),
+            "adjacency": self.adjacency.reshape(-1),
         }
 
 

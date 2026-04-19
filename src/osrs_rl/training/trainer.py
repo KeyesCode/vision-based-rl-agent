@@ -128,9 +128,10 @@ class Trainer:
             f"{cfg.ppo.num_envs} envs × {cfg.ppo.rollout_steps} steps per rollout"
         )
 
-        obs, _ = self.envs.reset(seed=cfg.seed)
+        obs, reset_info = self.envs.reset(seed=cfg.seed)
         obs_t = torch.as_tensor(obs, device=self.device)
         done_t = torch.zeros(cfg.ppo.num_envs, device=self.device)
+        adj_t = self._extract_adjacency(reset_info, cfg.ppo.num_envs)
 
         global_step = 0
         start_time = time.time()
@@ -168,12 +169,14 @@ class Trainer:
                     reward=reward,
                     done=done_t,
                     value=value,
+                    adjacency=adj_t,
                 )
 
                 self._record_episode_stats(infos)
 
                 obs_t = torch.as_tensor(next_obs, device=self.device)
                 done_t = torch.as_tensor(done, dtype=torch.float32, device=self.device)
+                adj_t = self._extract_adjacency(infos, cfg.ppo.num_envs)
 
             # Bootstrap value from the last observation for GAE.
             with torch.no_grad():
@@ -204,6 +207,12 @@ class Trainer:
         _LOG.info(f"Training complete. Artifacts: {self.run_dir}")
 
     # ----------------------------------------------------------------- helpers
+
+    def _extract_adjacency(self, infos: dict, num_envs: int) -> np.ndarray:
+        """Pull the per-env adjacency label out of a (possibly partial) batched info."""
+        if "adjacent_to_tree" in infos:
+            return np.asarray(infos["adjacent_to_tree"], dtype=np.float32)
+        return np.zeros(num_envs, dtype=np.float32)
 
     def _record_episode_stats(self, infos: dict) -> None:
         """Capture per-episode return/length/success from batched vector-env infos."""
@@ -264,6 +273,10 @@ class Trainer:
         w.add_scalar("losses/clip_fraction", metrics.clip_fraction, global_step)
         w.add_scalar("losses/explained_variance", metrics.explained_variance, global_step)
         w.add_scalar("charts/sps", sps, global_step)
+        if self.cfg.ppo.aux_adjacency_coef > 0.0:
+            w.add_scalar("aux/adjacency_loss", metrics.aux_loss, global_step)
+            if not np.isnan(metrics.aux_accuracy):
+                w.add_scalar("aux/adjacency_accuracy", metrics.aux_accuracy, global_step)
 
         if self._episode_returns:
             mean_r = float(np.mean(self._episode_returns))

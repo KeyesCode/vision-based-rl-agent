@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions import Categorical
 
@@ -24,7 +25,13 @@ from osrs_rl.utils.config import PPOConfig
 
 
 class PPOActorCritic(nn.Module, BasePolicy):
-    """Shared-backbone actor-critic for discrete action spaces."""
+    """Shared-backbone actor-critic for discrete action spaces.
+
+    An always-present ``aux_head`` predicts a binary label from CNN features —
+    used for the adjacency auxiliary loss when ``aux_adjacency_coef > 0``. Its
+    parameters are still loss-free when the coef is zero (the head just isn't
+    called), so adding it costs nothing for feedforward-only runs.
+    """
 
     def __init__(
         self,
@@ -35,10 +42,10 @@ class PPOActorCritic(nn.Module, BasePolicy):
     ):
         super().__init__()
         self.backbone = NatureCNN(in_channels, input_hw=input_hw, feature_dim=feature_dim)
-        # Small-std init on the actor is a common PPO detail — prevents early-training
-        # logits from saturating one action.
         self.actor = layer_init(nn.Linear(feature_dim, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(feature_dim, 1), std=1.0)
+        # Binary classifier on CNN features. Std=1.0 mimics the critic init.
+        self.aux_head = layer_init(nn.Linear(feature_dim, 1), std=1.0)
 
     def _features(self, obs: torch.Tensor) -> torch.Tensor:
         # uint8 -> float32 in [0, 1]. Cheap and numerically safe for CNN inputs.
@@ -59,11 +66,15 @@ class PPOActorCritic(nn.Module, BasePolicy):
 
     def evaluate_actions(
         self, obs: torch.Tensor, actions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return ``(log_probs, entropy, values, aux_logits)`` — the final element
+        is the raw aux-head output; trainers apply BCE only when the aux coef > 0.
+        """
         feat = self._features(obs)
         logits = self.actor(feat)
         dist = Categorical(logits=logits)
-        return dist.log_prob(actions), dist.entropy(), self.critic(feat).squeeze(-1)
+        aux = self.aux_head(feat).squeeze(-1)
+        return dist.log_prob(actions), dist.entropy(), self.critic(feat).squeeze(-1), aux
 
 
 @dataclass
@@ -75,6 +86,9 @@ class PPOUpdateMetrics:
     clip_fraction: float
     explained_variance: float
     learning_rate: float
+    # Adjacency auxiliary loss — stays at 0 / nan when the aux coef is 0.
+    aux_loss: float = 0.0
+    aux_accuracy: float = float("nan")
 
 
 class PPOTrainer:
@@ -107,6 +121,7 @@ class PPOTrainer:
         b_advantages = data["advantages"]
         b_returns = data["returns"]
         b_values = data["values"]
+        b_adjacency = data["adjacency"]
 
         indices = np.arange(self._batch_size)
         clip_fractions: list[float] = []
@@ -114,6 +129,9 @@ class PPOTrainer:
         policy_losses: list[float] = []
         value_losses: list[float] = []
         entropies: list[float] = []
+        aux_losses: list[float] = []
+        aux_accuracies: list[float] = []
+        use_aux = self.cfg.aux_adjacency_coef > 0.0
 
         early_stop = False
         for _ in range(self.cfg.num_epochs):
@@ -122,7 +140,7 @@ class PPOTrainer:
                 mb_idx = indices[start : start + self._minibatch_size]
                 mb_idx_t = torch.as_tensor(mb_idx, device=self.device)
 
-                new_logp, entropy, new_values = self.policy.evaluate_actions(
+                new_logp, entropy, new_values, new_aux = self.policy.evaluate_actions(
                     b_obs[mb_idx_t], b_actions[mb_idx_t]
                 )
                 logratio = new_logp - b_log_probs[mb_idx_t]
@@ -161,6 +179,15 @@ class PPOTrainer:
                 ent_loss = entropy.mean()
 
                 loss = pg_loss - self.cfg.ent_coef * ent_loss + self.cfg.vf_coef * v_loss
+                if use_aux:
+                    mb_adj = b_adjacency[mb_idx_t]
+                    aux_loss = F.binary_cross_entropy_with_logits(new_aux, mb_adj)
+                    loss = loss + self.cfg.aux_adjacency_coef * aux_loss
+                    with torch.no_grad():
+                        aux_pred = (torch.sigmoid(new_aux) > 0.5).float()
+                        aux_acc = (aux_pred == mb_adj).float().mean().item()
+                    aux_losses.append(aux_loss.item())
+                    aux_accuracies.append(aux_acc)
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -192,6 +219,8 @@ class PPOTrainer:
             clip_fraction=float(np.mean(clip_fractions)),
             explained_variance=explained_var,
             learning_rate=self.optimizer.param_groups[0]["lr"],
+            aux_loss=float(np.mean(aux_losses)) if aux_losses else 0.0,
+            aux_accuracy=float(np.mean(aux_accuracies)) if aux_accuracies else float("nan"),
         )
 
 
@@ -228,6 +257,9 @@ class RecurrentPPOActorCritic(nn.Module, RecurrentPolicy):
                 nn.init.orthogonal_(param, 1.0)
         self.actor = layer_init(nn.Linear(hidden_size, num_actions), std=0.01)
         self.critic = layer_init(nn.Linear(hidden_size, 1), std=1.0)
+        # Aux head reads directly from CNN features (pre-LSTM) so the supervised
+        # signal forces the backbone — not the LSTM — to encode adjacency.
+        self.aux_head = layer_init(nn.Linear(feature_dim, 1), std=1.0)
         self.hidden_size = hidden_size
         self.num_layers = 1
 
@@ -266,12 +298,22 @@ class RecurrentPPOActorCritic(nn.Module, RecurrentPolicy):
         actions_seq: torch.Tensor,
         initial_hidden: RecurrentState,
         episode_starts_seq: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        out_tbh, _ = self._sequence(obs_seq, initial_hidden, episode_starts_seq)
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Replay a batch of env sequences. Returns ``(log_probs, entropy, values, aux_logits)``.
+
+        Aux logits are computed from CNN features before the LSTM — the supervised
+        signal flows directly into the backbone, bypassing the recurrent layer.
+        """
+        T, B = actions_seq.shape
+        flat = obs_seq.reshape(T * B, *obs_seq.shape[2:])
+        feat_tb = self._cnn_features(flat)            # (T*B, F)
+        aux_logits = self.aux_head(feat_tb).squeeze(-1).reshape(T, B)
+        feat_seq = feat_tb.reshape(T, B, -1)
+        out_tbh, _ = self._lstm_with_resets(feat_seq, initial_hidden, episode_starts_seq.to(feat_seq))
         logits = self.actor(out_tbh)
         dist = Categorical(logits=logits)
         value = self.critic(out_tbh).squeeze(-1)
-        return dist.log_prob(actions_seq), dist.entropy(), value
+        return dist.log_prob(actions_seq), dist.entropy(), value, aux_logits
 
     # ------------------------------------------------------------------ internals
 
@@ -355,12 +397,17 @@ class RecurrentPPOTrainer:
         episode_starts = buffer.dones  # dones[t] == 1 iff obs[t] is post-reset
         h0, c0 = buffer.initial_hidden  # (1, N, H) each
 
+        adjacency_full = buffer.adjacency  # (T, N)
+        use_aux = cfg.aux_adjacency_coef > 0.0
+
         env_idx = np.arange(N)
         policy_losses: list[float] = []
         value_losses: list[float] = []
         entropies: list[float] = []
         approx_kls: list[float] = []
         clip_fractions: list[float] = []
+        aux_losses: list[float] = []
+        aux_accuracies: list[float] = []
 
         early_stop = False
         for _ in range(cfg.num_epochs):
@@ -377,8 +424,9 @@ class RecurrentPPOTrainer:
                 mb_old_values = old_values_full[:, mb_t]
                 mb_starts = episode_starts[:, mb_t]
                 mb_hidden = (h0[:, mb_t].contiguous(), c0[:, mb_t].contiguous())
+                mb_adjacency = adjacency_full[:, mb_t]
 
-                new_logp, entropy, new_values = self.policy.evaluate_sequence(
+                new_logp, entropy, new_values, new_aux = self.policy.evaluate_sequence(
                     mb_obs, mb_actions, mb_hidden, mb_starts
                 )
 
@@ -410,6 +458,14 @@ class RecurrentPPOTrainer:
 
                 ent_loss = entropy.mean()
                 loss = pg_loss - cfg.ent_coef * ent_loss + cfg.vf_coef * v_loss
+                if use_aux:
+                    aux_loss = F.binary_cross_entropy_with_logits(new_aux, mb_adjacency)
+                    loss = loss + cfg.aux_adjacency_coef * aux_loss
+                    with torch.no_grad():
+                        aux_pred = (torch.sigmoid(new_aux) > 0.5).float()
+                        aux_acc = (aux_pred == mb_adjacency).float().mean().item()
+                    aux_losses.append(aux_loss.item())
+                    aux_accuracies.append(aux_acc)
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -440,4 +496,6 @@ class RecurrentPPOTrainer:
             clip_fraction=float(np.mean(clip_fractions)),
             explained_variance=explained_var,
             learning_rate=self.optimizer.param_groups[0]["lr"],
+            aux_loss=float(np.mean(aux_losses)) if aux_losses else 0.0,
+            aux_accuracy=float(np.mean(aux_accuracies)) if aux_accuracies else float("nan"),
         )

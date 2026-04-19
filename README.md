@@ -398,25 +398,134 @@ python scripts/compare_recurrent.py \
     --output docs/results/recurrent_vs_feedforward.png
 ```
 
+## Representation attack — RGB 128×128 + adjacency auxiliary loss
+
+The M8 LSTM ablation implicated the CNN features themselves. Two independent
+representation improvements, shipped together:
+
+- **Option A — richer input.** `vision.resize_to: 128`, `vision.grayscale: false`.
+  CNN input goes from `(4, 84, 84)` to `(12, 128, 128)` — 3 color channels times
+  a 4-frame stack at the simulator's native render resolution. The Nature-CNN
+  architecture is unchanged; only the penultimate Linear layer widens.
+- **Option B — adjacency supervised loss.** A binary classifier `Linear(feature_dim, 1)`
+  sits on top of the CNN features and predicts `adjacent_to_tree ∈ {0, 1}`. The
+  label comes for free from the simulator's `GameState.nearest_tree_distance ≤ 1`,
+  threaded through `info["adjacent_to_tree"]` → rollout buffer → BCE loss. The
+  aux term is added to the PPO loss with weight `aux_adjacency_coef=0.1`.
+
+```
+(T, B, 12, 128, 128)  ──►  NatureCNN (unchanged)  ──►  (T, B, 512)
+                                                            │
+                                            ┌───────────────┼─────────────┐
+                                            ▼               ▼             ▼
+                                         actor            critic        aux head
+                                            │                              │
+                                            ▼                              ▼
+                                    action logits                  "adjacent to tree"
+                                                                    (BCE target)
+```
+
+### Experiment: same budget, one representation block replaced
+
+200k steps (~15 min on CPU — the bigger CNN input costs ~2× compute vs the
+grayscale baseline) with otherwise-identical hyperparameters. 50-episode
+evaluation, both stochastic sampling and deterministic argmax.
+
+![representation vs baseline](docs/results/representation_vs_baseline.png)
+
+| metric | baseline (84×84 gs) | **upgrade (128×128 RGB + aux)** | delta |
+|---|---|---|---|
+| stochastic return | +18.04 | +16.92 | −1.1 (tie, within σ) |
+| **stochastic success rate** | **4.0%** | **10.0%** | **+6 pp (2.5×)** |
+| deterministic return | −3.36 | −3.36 | — |
+| deterministic INTERACT share | 100% | 100% | — (argmax still collapses) |
+| **aux-head accuracy (train)** | — | **98.7%** | linear probe on adjacency |
+
+### Interpretation — the diagnosis, sharpened
+
+The aux loss **worked as a training signal** exactly as hoped: the CNN features
+now linearly separate "adjacent to a live tree" from "not adjacent" with 98.7%
+accuracy (measured on the live training rollouts, logged to TensorBoard under
+`aux/adjacency_accuracy`). The richer RGB input didn't hurt stochastic
+performance and **more than doubled the stochastic success rate** (4% → 10%) —
+exactly the kind of behavior you'd expect if the policy now has better
+situational features to sample from.
+
+But **the deterministic argmax policy is still collapsed to 100% INTERACT**, and
+the deterministic return is bit-identical to the grayscale baseline (−3.36 vs
+−3.36). Combined with M8's LSTM result, three independent experiments now agree
+on a single remaining failure mode:
+
+> **The bottleneck is not features, and it is not memory. It is the actor
+> head's marginal preference for INTERACT.**
+
+INTERACT has the highest unconditional expected return: every chop is +5, and
+invalid INTERACT is only −0.02. Over a full episode the marginal value of
+INTERACT beats every MOVE action by a wide margin, so the actor correctly
+assigns INTERACT the highest logit on *average* — and correspondingly on
+*every* state at argmax, even though the now-cleanly-encoded adjacency feature
+is sitting right there in the same feature vector.
+
+This is a well-known pathology in discrete-action PPO on sparse rewards, and it
+has **crisp, high-leverage fixes** that do not require more training or more
+network capacity:
+
+1. **Action masking at the policy output.** Use the aux head's prediction at
+   inference time to force `INTERACT`'s logit to `−∞` when the aux predicts
+   "not adjacent". This trivially breaks the argmax collapse because the
+   actor no longer has INTERACT as a choice in non-adjacent states.
+2. **State-dependent action advantage in reward.** Currently
+   `invalid_action_penalty = −0.02` is essentially free for the agent. Raising
+   it to `−0.5` (or dialing `log_collected` down so invalid INTERACT dominates
+   the value more) re-shapes the argmax preference directly.
+3. **Per-action entropy bonus.** Penalize state-independent action
+   distributions — literally add a loss term that rewards the logits moving
+   across states.
+
+M8 falsified the "memory" hypothesis. M9 falsifies the "features alone" hypothesis
+but validates "features + supervised signal helps stochastic behavior." The next
+milestone should address the actor-head pathology directly.
+
+### Reproduce
+
+```bash
+# Train representation-upgrade policy (~15 min on CPU)
+osrs-train --config configs/ppo_woodcutting_repr.yaml
+
+# Evaluate stochastic + deterministic
+osrs-eval --checkpoint runs/ppo_woodcutting_repr/checkpoints/latest.pt \
+          --config configs/ppo_woodcutting_repr.yaml --episodes 50 \
+          --output runs/ppo_woodcutting_repr/eval_trained.json
+osrs-eval --checkpoint runs/ppo_woodcutting_repr/checkpoints/latest.pt \
+          --config configs/ppo_woodcutting_repr.yaml --episodes 50 --deterministic \
+          --output runs/ppo_woodcutting_repr/eval_trained_det.json
+
+# Chart vs feedforward baseline
+python scripts/compare_representation.py \
+    --baseline-stochastic    runs/ppo_woodcutting_v2/eval_trained.json \
+    --baseline-deterministic runs/ppo_woodcutting_v2/eval_trained_det.json \
+    --repr-stochastic        runs/ppo_woodcutting_repr/eval_trained.json \
+    --repr-deterministic     runs/ppo_woodcutting_repr/eval_trained_det.json \
+    --output docs/results/representation_vs_baseline.png
+```
+
 ## Next steps: sim-to-real
 
-Domain randomization has landed, and the recurrent-policy ablation above points the
-next work squarely at the **representation**, not the algorithm. In priority order:
+The M8 + M9 ablations together localize the remaining bottleneck to the actor
+head, not the encoder or the policy memory. Sim-to-real levers in priority
+order:
 
-1. **Higher input resolution + RGB channels.** 84×84 grayscale collapses
-   adjacency into 1–2 pixel differences after the CNN downsampling stack. Moving
-   to 128×128 RGB (or fine-scale local crops around the cursor) is the single
-   highest-leverage change implied by the recurrent-PPO ablation — the feature
-   map is what's missing information, so expanding it is how to reclaim it.
-2. **Auxiliary supervised loss on adjacency labels.** Add a small classification
-   head during training that predicts "tree adjacent to agent" from the CNN
-   features, with labels taken directly from the simulator. Forces the backbone
-   to linearly separate that concept.
-3. **Real-frame fine-tuning.** Same aux-loss trick but with a few hundred
-   labeled OSRS screenshots — closes the sim-to-real feature gap.
-4. **Harder distractor clutter.** Add distractors shaped like trees-with-wrong-color
+1. **Action masking / value-function guard on INTERACT.** Use the (now-accurate)
+   aux head at inference time to set INTERACT's logit to `−∞` in states the
+   model predicts as "not adjacent". Directly breaks the argmax collapse — no
+   more training required.
+2. **Real-frame fine-tuning of the aux head.** Collect a few hundred labeled
+   OSRS screenshots and re-train only the aux-head + CNN backbone on them.
+   Makes the "adjacent" prediction robust on real pixels so live-mode action
+   masking becomes reliable.
+3. **Harder distractor clutter.** Add distractors shaped like trees-with-wrong-color
    and trees-with-wrong-size to force the CNN to use shape features, not just color.
-5. **CV-based action decoder.** Instead of a naive virtual cursor, have the live
+4. **CV-based action decoder.** Instead of a naive virtual cursor, have the live
    client detect tree pixels and expose a "click nearest tree" macro as an action —
    the policy then only has to choose _when_, not _where_.
 
@@ -428,7 +537,8 @@ next work squarely at the **representation**, not the algorithm. In priority ord
 - [x] CI (GitHub Actions) + architecture diagram + README polish
 - [x] Domain randomization (palette / HUD / clutter / per-frame noise) + robustness ablation
 - [x] Recurrent PPO (LSTM) — tested; falsified the "memory bottleneck" hypothesis
-- [ ] Higher input resolution + adjacency-aux-loss (representation attack)
+- [x] Representation attack (RGB 128×128 + adjacency aux loss) — aux head hit 98.7% accuracy, stochastic success 4% → 10%, argmax collapse persists
+- [ ] Action masking using the aux head at inference time (breaks argmax collapse)
 - [ ] DQN baseline behind the same `BasePolicy` interface
 - [ ] Second task (combat? mining?) as generalization test
 

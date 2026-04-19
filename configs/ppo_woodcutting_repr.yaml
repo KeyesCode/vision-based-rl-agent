@@ -1,0 +1,62 @@
+# Representation-attack config. Two changes vs ppo_woodcutting.yaml:
+#
+#   1. RGB + higher resolution  — 128x128 RGB (grayscale: false) keeps all 3
+#      channels and matches the simulator's native render size so the CNN sees
+#      the full pixel budget instead of a lossy grayscale downsample.
+#   2. Adjacency auxiliary loss — a small BCE head on top of CNN features
+#      predicts "adjacent to a live tree" from labels taken directly out of the
+#      simulator. Target: force the backbone to linearly separate the one
+#      feature the M8 LSTM ablation showed the policy was missing.
+
+seed: 42
+device: auto
+
+env:
+  grid_size: 16
+  tile_size: 8
+  num_trees: 6
+  max_inventory: 10
+  max_episode_steps: 300
+  chop_ticks: 1
+  tree_respawn_ticks: 10
+
+vision:
+  resize_to: 128       # matches native sim render (grid_size * tile_size)
+  grayscale: false     # keep RGB channels
+  frame_stack: 4       # CNN input becomes (12, 128, 128)
+
+reward:
+  log_collected: 5.0
+  step_penalty: -0.01
+  invalid_action_penalty: -0.02
+  idle_penalty: -0.05
+  distance_shaping: 0.1
+  adjacency_bonus: 0.5
+  full_inventory_bonus: 10.0
+
+ppo:
+  total_timesteps: 200000   # ~15 min on CPU given the bigger CNN input
+  num_envs: 8
+  rollout_steps: 128
+  num_epochs: 4
+  num_minibatches: 4
+  clip_coef: 0.2
+  vf_coef: 0.5
+  gamma: 0.99
+  gae_lambda: 0.95
+  learning_rate: 0.00025
+  anneal_lr: true
+  max_grad_norm: 0.5
+  target_kl: null
+  norm_adv: true
+  clip_vloss: true
+  ent_coef: 0.01
+  aux_adjacency_coef: 0.1   # enables the auxiliary BCE loss
+
+logging:
+  run_name: ppo_woodcutting_repr
+  log_dir: runs
+  log_interval_updates: 1
+  checkpoint_interval_updates: 25
+  eval_interval_updates: 25
+  eval_episodes: 5

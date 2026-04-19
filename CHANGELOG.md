@@ -6,6 +6,52 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-18
+
+Representation attack — RGB 128×128 input plus an adjacency auxiliary loss on
+top of the CNN features. Diagnostically completes the trilogy of ablations
+(feedforward → LSTM → representation) and localizes the remaining performance
+gap to the actor head's marginal action preference.
+
+### Added
+
+- **Representation attack (Option A + Option B, combined).**
+  - *Option A* — `vision.resize_to: 128` + `vision.grayscale: false`, CNN input
+    shape goes `(4, 84, 84)` → `(12, 128, 128)`.
+  - *Option B* — an always-present `aux_head = Linear(feature_dim, 1)` on top of
+    the CNN features of both `PPOActorCritic` and `RecurrentPPOActorCritic`.
+    `evaluate_actions` / `evaluate_sequence` return aux logits alongside
+    `log_probs / entropy / values`. Trainers add
+    `aux_adjacency_coef * BCEWithLogitsLoss` to the PPO total when the coef is
+    non-zero.
+  - `info["adjacent_to_tree"]` scalar on reset and every step,
+    `RolloutBuffer.adjacency` storage, `Trainer._extract_adjacency` plumbing,
+    TB metrics `aux/adjacency_loss` and `aux/adjacency_accuracy`.
+- **`configs/ppo_woodcutting_repr.yaml`** — 128×128 RGB + `aux_adjacency_coef: 0.1`.
+- **`scripts/compare_representation.py`** — 4-panel baseline-vs-upgrade chart.
+- **`tests/test_aux_loss.py`** — 6 tests covering env label emission, buffer
+  storage, feedforward aux forward pass, recurrent aux forward pass (T, B shape).
+- **`docs/results/representation_vs_baseline.png`** — committed result asset.
+
+### Changed
+
+- **`load_checkpoint` default to `strict=False`** so older checkpoints (without
+  the aux head) still load cleanly into newer policy classes.
+
+### Findings
+
+- The aux head trained to **98.7% accuracy** on the adjacency label — the CNN
+  features now provably encode adjacency as a linearly separable direction.
+  **Stochastic success rate more than doubled (4% → 10%)**. Deterministic
+  argmax behavior was **bit-identical** to the grayscale baseline (−3.36
+  return, 100% INTERACT), establishing that the remaining failure mode is in
+  the actor head's marginal preference for INTERACT — not in features and not
+  in memory. README documents this with the three-experiment diagnosis
+  (feedforward → LSTM → representation) and points the next milestone at
+  action masking using the trained aux head at inference time.
+
+## [0.3.0] — 2026-04-18
+
 ## [0.3.0] — 2026-04-18
 
 Domain randomization + recurrent PPO ablation. The headline result is a
