@@ -94,6 +94,9 @@ class PPOConfig:
     target_kl: float | None = None  # None disables KL early-stop
     norm_adv: bool = True
     clip_vloss: bool = True
+    # --- Recurrent PPO (LSTM head on top of the CNN encoder) ---
+    recurrent: bool = False
+    lstm_hidden_size: int = 256
 
 
 @dataclass

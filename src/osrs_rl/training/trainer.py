@@ -15,8 +15,13 @@ import numpy as np
 import torch
 from gymnasium.vector import SyncVectorEnv
 
-from osrs_rl.agents.ppo import PPOActorCritic, PPOTrainer
-from osrs_rl.agents.rollout_buffer import RolloutBuffer
+from osrs_rl.agents.ppo import (
+    PPOActorCritic,
+    PPOTrainer,
+    RecurrentPPOActorCritic,
+    RecurrentPPOTrainer,
+)
+from osrs_rl.agents.rollout_buffer import RecurrentRolloutBuffer, RolloutBuffer
 from osrs_rl.env.action_space import ActionDecoder
 from osrs_rl.env.osrs_env import make_env
 from osrs_rl.training.checkpoint import save_checkpoint
@@ -48,18 +53,37 @@ class Trainer:
         input_hw = (obs_shape[1], obs_shape[2])
         num_actions = ActionDecoder.n_actions()
 
-        self.policy = PPOActorCritic(
-            num_actions=num_actions, in_channels=in_channels, input_hw=input_hw
-        ).to(self.device)
-        self.ppo = PPOTrainer(self.policy, cfg.ppo, self.device)
-
-        self.buffer = RolloutBuffer(
-            rollout_steps=cfg.ppo.rollout_steps,
-            num_envs=cfg.ppo.num_envs,
-            obs_shape=obs_shape,
-            device=self.device,
-            obs_dtype=torch.uint8,
-        )
+        self.recurrent = cfg.ppo.recurrent
+        if self.recurrent:
+            self.policy = RecurrentPPOActorCritic(
+                num_actions=num_actions,
+                in_channels=in_channels,
+                input_hw=input_hw,
+                hidden_size=cfg.ppo.lstm_hidden_size,
+            ).to(self.device)
+            self.ppo = RecurrentPPOTrainer(self.policy, cfg.ppo, self.device)
+            self.buffer = RecurrentRolloutBuffer(
+                rollout_steps=cfg.ppo.rollout_steps,
+                num_envs=cfg.ppo.num_envs,
+                obs_shape=obs_shape,
+                hidden_size=cfg.ppo.lstm_hidden_size,
+                device=self.device,
+                obs_dtype=torch.uint8,
+            )
+            self.hidden = self.policy.initial_hidden(cfg.ppo.num_envs, self.device)
+        else:
+            self.policy = PPOActorCritic(
+                num_actions=num_actions, in_channels=in_channels, input_hw=input_hw
+            ).to(self.device)
+            self.ppo = PPOTrainer(self.policy, cfg.ppo, self.device)
+            self.buffer = RolloutBuffer(
+                rollout_steps=cfg.ppo.rollout_steps,
+                num_envs=cfg.ppo.num_envs,
+                obs_shape=obs_shape,
+                device=self.device,
+                obs_dtype=torch.uint8,
+            )
+            self.hidden = None
 
         self._episode_returns: deque[float] = deque(maxlen=100)
         self._episode_lengths: deque[int] = deque(maxlen=100)
@@ -117,10 +141,20 @@ class Trainer:
                 self.ppo.set_learning_rate(frac * cfg.ppo.learning_rate)
 
             self.buffer.reset()
+            if self.recurrent:
+                # Snapshot the hidden state that will feed the first step — the
+                # update will replay LSTM sequences from exactly this state.
+                self.buffer.set_initial_hidden(self.hidden)
+
             for _ in range(cfg.ppo.rollout_steps):
                 global_step += cfg.ppo.num_envs
                 with torch.no_grad():
-                    action, log_prob, value = self.policy.act(obs_t)
+                    if self.recurrent:
+                        action, log_prob, value, self.hidden = self.policy.act(
+                            obs_t, self.hidden, done_t
+                        )
+                    else:
+                        action, log_prob, value = self.policy.act(obs_t)
 
                 next_obs, reward, terminated, truncated, infos = self.envs.step(
                     action.cpu().numpy()
@@ -143,7 +177,10 @@ class Trainer:
 
             # Bootstrap value from the last observation for GAE.
             with torch.no_grad():
-                last_values = self.policy.get_value(obs_t)
+                if self.recurrent:
+                    last_values = self.policy.get_value(obs_t, self.hidden, done_t)
+                else:
+                    last_values = self.policy.get_value(obs_t)
             self.buffer.compute_returns_and_advantages(
                 last_values=last_values,
                 last_dones=done_t,
@@ -288,9 +325,23 @@ class Trainer:
             total_r = 0.0
             steps = 0
             terminated = truncated = False
+            # Recurrent policies keep a per-env hidden state that must reset at
+            # each episode boundary — here the single eval env is the one env.
+            hidden = (
+                self.policy.initial_hidden(1, self.device) if self.recurrent else None
+            )
             while not (terminated or truncated):
                 obs_t = torch.as_tensor(obs, device=self.device).unsqueeze(0)
-                action, _, _ = self.policy.act(obs_t, deterministic=True)
+                if self.recurrent:
+                    # episode_start = 1 on the very first step, 0 afterwards.
+                    start = torch.tensor(
+                        [1.0 if steps == 0 else 0.0], device=self.device
+                    )
+                    action, _, _, hidden = self.policy.act(
+                        obs_t, hidden, start, deterministic=True
+                    )
+                else:
+                    action, _, _ = self.policy.act(obs_t, deterministic=True)
                 obs, reward, terminated, truncated, _ = self.eval_env.step(
                     int(action.item())
                 )

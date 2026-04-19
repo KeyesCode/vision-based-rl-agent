@@ -300,24 +300,125 @@ python scripts/compare_robustness.py \
   — DR improves robustness without solving the representation problem, which is what
   the next milestone (recurrent policy) targets.
 
+## Recurrent policy (LSTM) — a hypothesis, rigorously falsified
+
+The M4 results suggested the argmax-collapse and success-rate plateau came from
+partial observability: the policy sees one framestacked window at a time and can't
+track "which tree am I walking toward". A natural fix is to give the policy
+**short-horizon memory** via a single LSTM layer between the CNN encoder and the
+actor/critic heads.
+
+### Architecture
+
+```
+(T, B, C, H, W) obs  ──►  NatureCNN (unchanged)  ──►  (T, B, F)
+                                                           │
+                                                           ▼
+                                              nn.LSTM (hidden=256)  ◄── h, c
+                                                           │
+                                                           ▼
+                                                       (T, B, 256)
+                                                           │
+                                                      ┌────┴────┐
+                                                      ▼         ▼
+                                                    actor      critic
+```
+
+Hidden state is reset per step whenever `episode_starts[t] == 1` (i.e. the obs came
+from an env auto-reset). Minibatches during updates **partition envs, not
+timesteps** — each minibatch is a full length-`T` sequence for a subset of envs,
+so temporal order is preserved and PPO replays the LSTM through each sequence from
+the correct initial hidden state.
+
+Implementation lives behind `cfg.ppo.recurrent: true`:
+`src/osrs_rl/agents/ppo.py::RecurrentPPOActorCritic`,
+`RecurrentPPOTrainer`, `RecurrentRolloutBuffer`. Feedforward path is unchanged.
+
+### Experiment: same budget, same hyperparameters, one config delta
+
+300k steps, identical seed, identical reward, identical PPO knobs. Evaluated over
+50 fresh episodes under both stochastic sampling and deterministic argmax.
+
+![feedforward vs recurrent](docs/results/recurrent_vs_feedforward.png)
+
+| metric | feedforward | recurrent (LSTM) | delta |
+|---|---|---|---|
+| stochastic return | +18.04 | +19.57 | **+1.5 pts** |
+| deterministic return | −3.36 | −3.36 | — |
+| stochastic success rate | 4.0% | 4.0% | — |
+| stochastic idle ratio | 0.3% | 1.1% | slightly worse |
+| stochastic invalid-action ratio | 0.45 | 0.37 | small improvement |
+| deterministic INTERACT share | 100% | 100% | argmax still collapses |
+
+### Interpretation
+
+The recurrent policy gave a small stochastic-return bump and a modest reduction in
+invalid actions, but **did not resolve the two behaviors the hypothesis was meant
+to explain**:
+
+1. **Argmax collapse persists, identically.** With deterministic action selection
+   both policies pick INTERACT on every step. The LSTM's hidden state successfully
+   encodes *something*, but whatever it encodes does not move INTERACT out of the
+   top-logit slot when the agent isn't adjacent to a tree.
+2. **Success rate unchanged at 4%.** The same post-chop navigation failure mode
+   the feedforward policy has, the recurrent policy also has.
+
+The honest read: **the bottleneck is in the CNN encoder, not in policy memory.**
+At 84×84 grayscale with 8×8 tile-sized features, the representation the CNN
+produces apparently doesn't cleanly separate "tree adjacent" from "tree in line of
+sight but two tiles away." No amount of downstream memory reconstructs information
+that was never in the features to begin with.
+
+This is a **valuable negative result** for the portfolio — a clean ablation that
+falsifies a plausible-sounding hypothesis. The redirection it implies is concrete:
+next-step work should attack the **representation** (higher resolution, RGB
+channels, auxiliary supervised loss on adjacency labels) rather than adding more
+recurrence or capacity on top of the existing features.
+
+### Reproduce
+
+```bash
+# Train recurrent PPO (~10 min on CPU, num_envs=8)
+osrs-train --config configs/ppo_woodcutting_lstm.yaml
+
+# Evaluate stochastic + deterministic
+osrs-eval --checkpoint runs/ppo_woodcutting_lstm/checkpoints/latest.pt \
+          --config configs/ppo_woodcutting_lstm.yaml --episodes 50 \
+          --output runs/ppo_woodcutting_lstm/eval_trained.json
+osrs-eval --checkpoint runs/ppo_woodcutting_lstm/checkpoints/latest.pt \
+          --config configs/ppo_woodcutting_lstm.yaml --episodes 50 --deterministic \
+          --output runs/ppo_woodcutting_lstm/eval_trained_det.json
+
+# Side-by-side chart
+python scripts/compare_recurrent.py \
+    --ff-stochastic       runs/ppo_woodcutting_v2/eval_trained.json \
+    --ff-deterministic    runs/ppo_woodcutting_v2/eval_trained_det.json \
+    --lstm-stochastic     runs/ppo_woodcutting_lstm/eval_trained.json \
+    --lstm-deterministic  runs/ppo_woodcutting_lstm/eval_trained_det.json \
+    --output docs/results/recurrent_vs_feedforward.png
+```
+
 ## Next steps: sim-to-real
 
-Domain randomization (above) is the first of these to land. In priority order, the
-remaining sim-to-real levers:
+Domain randomization has landed, and the recurrent-policy ablation above points the
+next work squarely at the **representation**, not the algorithm. In priority order:
 
-1. **Recurrent policy head (GRU/LSTM).** Addresses the representation bottleneck
-   directly by giving the policy multi-frame memory — which tree am I walking toward,
-   is the chop animation still running. Closes the argmax-collapse gap.
-2. **Real-frame fine-tuning.** Collect a few hundred labeled OSRS screenshots
-   (tree / no-tree, adjacent / not), add a lightweight supervised aux-loss on the CNN
-   backbone during PPO training so the visual features transfer.
-3. **Harder distractor clutter.** Add distractors shaped like trees-with-wrong-color
+1. **Higher input resolution + RGB channels.** 84×84 grayscale collapses
+   adjacency into 1–2 pixel differences after the CNN downsampling stack. Moving
+   to 128×128 RGB (or fine-scale local crops around the cursor) is the single
+   highest-leverage change implied by the recurrent-PPO ablation — the feature
+   map is what's missing information, so expanding it is how to reclaim it.
+2. **Auxiliary supervised loss on adjacency labels.** Add a small classification
+   head during training that predicts "tree adjacent to agent" from the CNN
+   features, with labels taken directly from the simulator. Forces the backbone
+   to linearly separate that concept.
+3. **Real-frame fine-tuning.** Same aux-loss trick but with a few hundred
+   labeled OSRS screenshots — closes the sim-to-real feature gap.
+4. **Harder distractor clutter.** Add distractors shaped like trees-with-wrong-color
    and trees-with-wrong-size to force the CNN to use shape features, not just color.
-4. **CV-based action decoder.** Instead of a naive virtual cursor, have the live
+5. **CV-based action decoder.** Instead of a naive virtual cursor, have the live
    client detect tree pixels and expose a "click nearest tree" macro as an action —
    the policy then only has to choose _when_, not _where_.
-5. **Curriculum: `grid_size=8 → 16`, simulator resolution 84 → 128 RGB**, widening
-   the backbone. Cleaner single-task proof before sim-to-real.
 
 ## Roadmap
 
@@ -326,7 +427,8 @@ remaining sim-to-real levers:
 - [x] Live OSRS client with safety-gated input and dry-run by default
 - [x] CI (GitHub Actions) + architecture diagram + README polish
 - [x] Domain randomization (palette / HUD / clutter / per-frame noise) + robustness ablation
-- [ ] Recurrent policy head (GRU/LSTM)
+- [x] Recurrent PPO (LSTM) — tested; falsified the "memory bottleneck" hypothesis
+- [ ] Higher input resolution + adjacency-aux-loss (representation attack)
 - [ ] DQN baseline behind the same `BasePolicy` interface
 - [ ] Second task (combat? mining?) as generalization test
 

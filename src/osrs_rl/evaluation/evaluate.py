@@ -20,7 +20,7 @@ import numpy as np
 import torch
 import tyro
 
-from osrs_rl.agents.ppo import PPOActorCritic
+from osrs_rl.agents.ppo import PPOActorCritic, RecurrentPPOActorCritic
 from osrs_rl.env.action_space import ActionDecoder, ActionType
 from osrs_rl.env.game_client import GameClient
 from osrs_rl.env.osrs_env import make_env
@@ -95,23 +95,34 @@ def _build_live_client(cfg: TrainConfig, live_cfg: LiveConfig) -> GameClient:
     return LiveOSRSClient(cfg.env, live_cfg)
 
 
-def _load_policy(cfg: TrainConfig, checkpoint_path: str, device: torch.device) -> PPOActorCritic:
+def _load_policy(
+    cfg: TrainConfig, checkpoint_path: str, device: torch.device
+) -> PPOActorCritic | RecurrentPPOActorCritic:
     """Build a fresh sim env temporarily to determine the obs shape, then load weights.
 
-    We always probe obs shape against the simulator because the vision wrappers are
-    what determine the policy input shape (grayscale / resize / framestack) — not the
-    raw capture resolution.
+    Probe obs shape against the simulator because the vision wrappers determine the
+    policy input shape (grayscale / resize / framestack) — not the raw capture
+    resolution. Recurrent or feedforward class is chosen from ``cfg.ppo.recurrent``.
     """
     env = _build_env(cfg, seed=0)
     try:
         obs_shape = env.observation_space.shape  # type: ignore[union-attr]
     finally:
         env.close()
-    policy = PPOActorCritic(
-        num_actions=ActionDecoder.n_actions(),
-        in_channels=obs_shape[0],
-        input_hw=(obs_shape[1], obs_shape[2]),
-    ).to(device)
+
+    if cfg.ppo.recurrent:
+        policy: PPOActorCritic | RecurrentPPOActorCritic = RecurrentPPOActorCritic(
+            num_actions=ActionDecoder.n_actions(),
+            in_channels=obs_shape[0],
+            input_hw=(obs_shape[1], obs_shape[2]),
+            hidden_size=cfg.ppo.lstm_hidden_size,
+        ).to(device)
+    else:
+        policy = PPOActorCritic(
+            num_actions=ActionDecoder.n_actions(),
+            in_channels=obs_shape[0],
+            input_hw=(obs_shape[1], obs_shape[2]),
+        ).to(device)
     load_checkpoint(checkpoint_path, policy=policy, map_location=device)
     policy.eval()
     return policy
@@ -143,18 +154,28 @@ def evaluate(
     idle: list[float] = []
     action_counts = np.zeros(ActionDecoder.n_actions(), dtype=np.int64)
 
+    is_recurrent = isinstance(policy, RecurrentPPOActorCritic)
+
     for ep in range(episodes):
         obs, _ = env.reset(seed=seed + ep)
         total_r = 0.0
         steps = 0
         terminated = truncated = False
         last_info: dict = {}
+        # Recurrent policies reset their hidden state at every episode boundary.
+        hidden = policy.initial_hidden(1, device) if is_recurrent else None
         while not (terminated or truncated):
             if policy is None:
                 action = int(rng.integers(0, ActionDecoder.n_actions()))
             else:
                 obs_t = torch.as_tensor(obs, device=device).unsqueeze(0)
-                a, _, _ = policy.act(obs_t, deterministic=deterministic)
+                if is_recurrent:
+                    start = torch.tensor([1.0 if steps == 0 else 0.0], device=device)
+                    a, _, _, hidden = policy.act(  # type: ignore[misc]
+                        obs_t, hidden, start, deterministic=deterministic
+                    )
+                else:
+                    a, _, _ = policy.act(obs_t, deterministic=deterministic)
                 action = int(a.item())
             obs, r, terminated, truncated, info = env.step(action)
             total_r += float(r)

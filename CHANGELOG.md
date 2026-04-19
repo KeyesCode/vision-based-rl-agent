@@ -6,6 +6,32 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Recurrent PPO (LSTM).** `RecurrentPPOActorCritic`, `RecurrentPPOTrainer`, and
+  `RecurrentRolloutBuffer` sit behind `cfg.ppo.recurrent`. Hidden state resets
+  per step on `episode_starts == 1`; PPO updates minibatch by envs, not timesteps,
+  preserving temporal order.
+- **`configs/ppo_woodcutting_lstm.yaml`** — identical hyperparameters to the
+  feedforward config aside from the recurrent block.
+- **`scripts/compare_recurrent.py`** — 4-panel feedforward-vs-recurrent chart.
+- **`tests/test_recurrent.py`** — hidden-state-reset correctness + full
+  one-update smoke test.
+
+### Changed
+
+- **`Trainer` and `evaluate.py`** branch on `cfg.ppo.recurrent` for rollout
+  collection, value bootstrap, and CLI/deterministic eval. Feedforward path is
+  untouched.
+
+### Findings
+
+- The LSTM ablation produced a **clean negative result**: +1.5 stochastic return,
+  identical deterministic return, identical success rate, identical argmax
+  collapse vs the feedforward baseline. Documented honestly in the README as
+  evidence that the remaining performance gap sits in the CNN encoder (feature
+  expressivity), not in policy memory.
+
 ## [0.2.0] — 2026-04-18
 
 Analysis, live evaluation, repo polish, and domain randomization.

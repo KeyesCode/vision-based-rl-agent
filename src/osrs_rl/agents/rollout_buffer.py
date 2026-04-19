@@ -93,3 +93,36 @@ class RolloutBuffer:
             "returns": self.returns.reshape(-1),
             "values": self.values.reshape(-1),
         }
+
+
+class RecurrentRolloutBuffer(RolloutBuffer):
+    """Rollout buffer that additionally stores the LSTM hidden state at the start
+    of each rollout, so sequences can be replayed during PPO updates.
+
+    The storage shapes for everything else (obs / actions / rewards / dones /
+    values) are unchanged — they're still ``(T, N, ...)``. The only reason this
+    subclass exists is to hold ``initial_hidden`` and expose it to the trainer.
+    """
+
+    def __init__(
+        self,
+        rollout_steps: int,
+        num_envs: int,
+        obs_shape: tuple[int, ...],
+        hidden_size: int,
+        device: torch.device,
+        obs_dtype: torch.dtype = torch.uint8,
+        num_layers: int = 1,
+    ):
+        super().__init__(rollout_steps, num_envs, obs_shape, device, obs_dtype=obs_dtype)
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.initial_hidden: tuple[torch.Tensor, torch.Tensor] = (
+            torch.zeros(num_layers, num_envs, hidden_size, device=device),
+            torch.zeros(num_layers, num_envs, hidden_size, device=device),
+        )
+
+    def set_initial_hidden(self, hidden: tuple[torch.Tensor, torch.Tensor]) -> None:
+        """Capture the hidden state that was active at rollout-step 0."""
+        h, c = hidden
+        self.initial_hidden = (h.detach().clone(), c.detach().clone())
