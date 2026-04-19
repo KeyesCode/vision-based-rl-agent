@@ -6,31 +6,64 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-04-18
+
+Domain randomization + recurrent PPO ablation. The headline result is a
+reproducible, cleanly-ablated sim-to-real robustness improvement (DR) and a
+rigorously falsified hypothesis about memory (LSTM).
+
 ### Added
 
+- **Domain randomization in the simulator** (`src/osrs_rl/env/simulator/randomization.py`).
+  Per-episode palette / HUD-position / distractor-clutter / tree-size jitter plus
+  per-frame brightness / contrast / Gaussian-noise augmentation — each behind an
+  independent config flag, identity-tested to be bit-exact with the pre-DR path
+  when disabled.
+- **`configs/ppo_woodcutting_dr.yaml`** — moderate DR preset (color_jitter 0.18,
+  clutter 6%, brightness 0.15, contrast 0.12, noise σ=6, HUD-side randomized,
+  tree-size jitter 1).
+- **`scripts/compare_robustness.py`** and **`scripts/render_dr_samples.py`** —
+  2×2 robustness bar chart and 3×3 randomized-frame sampler for the README.
+- **`docs/results/dr_samples.png`**, **`docs/results/robustness.png`** — committed
+  result assets.
 - **Recurrent PPO (LSTM).** `RecurrentPPOActorCritic`, `RecurrentPPOTrainer`, and
   `RecurrentRolloutBuffer` sit behind `cfg.ppo.recurrent`. Hidden state resets
-  per step on `episode_starts == 1`; PPO updates minibatch by envs, not timesteps,
-  preserving temporal order.
+  per step on `episode_starts == 1`; PPO updates minibatch by envs, not
+  timesteps, preserving temporal order.
 - **`configs/ppo_woodcutting_lstm.yaml`** — identical hyperparameters to the
   feedforward config aside from the recurrent block.
 - **`scripts/compare_recurrent.py`** — 4-panel feedforward-vs-recurrent chart.
-- **`tests/test_recurrent.py`** — hidden-state-reset correctness + full
-  one-update smoke test.
+- **`tests/test_randomization.py`** — 5 tests: identity when disabled, diversity
+  when enabled, no-op on zeroed knobs, frame-level no-op, clutter never overlaps
+  occupied tiles.
+- **`tests/test_recurrent.py`** — 4 tests: initial-hidden shape,
+  episode-start resets hidden correctly, hidden persists between steps without a
+  reset, full rollout + PPO update smoke.
 
 ### Changed
 
 - **`Trainer` and `evaluate.py`** branch on `cfg.ppo.recurrent` for rollout
-  collection, value bootstrap, and CLI/deterministic eval. Feedforward path is
-  untouched.
+  collection, value bootstrap, and deterministic/stochastic eval. Feedforward
+  path is untouched.
+- **`MockOSRSClient`** now consumes an `EpisodeVisuals` snapshot; `make_env`
+  gained a `randomization_cfg` parameter threaded through the trainer and
+  evaluator.
+- **README** — added a "Domain randomization" section with the 2×2 robustness
+  matrix and a "Recurrent policy (LSTM) — a hypothesis, rigorously falsified"
+  section with the feedforward-vs-recurrent ablation.
 
 ### Findings
 
-- The LSTM ablation produced a **clean negative result**: +1.5 stochastic return,
-  identical deterministic return, identical success rate, identical argmax
-  collapse vs the feedforward baseline. Documented honestly in the README as
-  evidence that the remaining performance gap sits in the CNN encoder (feature
-  expressivity), not in policy memory.
+- **Domain randomization acted as a regularizer** on top of improving robustness:
+  the DR-trained policy was the best policy on *both* the baseline and the
+  randomized evaluation envs. Success rate on randomized visuals rose from 0.0%
+  (baseline policy) to 6.7% (DR policy).
+- **Recurrent PPO ablation produced a clean negative result**: +1.5 stochastic
+  return, identical deterministic return, identical success rate, identical
+  argmax collapse vs the feedforward baseline. Documented honestly in the README
+  as evidence that the remaining performance gap sits in the CNN encoder
+  (feature expressivity), not in policy memory. Redirects the next milestone to
+  higher input resolution + adjacency-aux-loss.
 
 ## [0.2.0] — 2026-04-18
 
