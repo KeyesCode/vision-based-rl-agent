@@ -1,0 +1,52 @@
+# MVP config — PPO on the woodcutting simulator. Tuned for a laptop CPU run that shows
+# a visibly-learning reward curve in well under an hour.
+
+seed: 42
+device: auto
+
+env:
+  grid_size: 16
+  tile_size: 8
+  num_trees: 6
+  max_inventory: 10          # smaller than OSRS's 28 so episodes complete in ~100-200 steps
+  max_episode_steps: 300
+  chop_ticks: 3
+  tree_respawn_ticks: 20
+
+vision:
+  resize_to: 84
+  grayscale: true
+  frame_stack: 4
+
+reward:
+  log_collected: 1.0
+  step_penalty: -0.01
+  invalid_action_penalty: -0.1
+  distance_shaping: 0.05
+  full_inventory_bonus: 10.0
+
+ppo:
+  total_timesteps: 300000
+  num_envs: 8
+  rollout_steps: 128
+  num_epochs: 4
+  num_minibatches: 4
+  clip_coef: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.01
+  gamma: 0.99
+  gae_lambda: 0.95
+  learning_rate: 0.00025
+  anneal_lr: true
+  max_grad_norm: 0.5
+  target_kl: null
+  norm_adv: true
+  clip_vloss: true
+
+logging:
+  run_name: ppo_woodcutting
+  log_dir: runs
+  log_interval_updates: 1
+  checkpoint_interval_updates: 25
+  eval_interval_updates: 25
+  eval_episodes: 5

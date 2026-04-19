@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osrs-rl"
+version = "0.1.0"
+description = "Vision-based reinforcement learning agent for Old School RuneScape."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Tanner Keyes" }]
+dependencies = [
+    "torch>=2.2",
+    "torchvision",
+    "numpy",
+    "gymnasium>=0.29",
+    "opencv-python-headless",
+    "pillow",
+    "tensorboard",
+    "tyro>=0.7",
+    "pyyaml",
+    "rich",
+    "tqdm",
+    "matplotlib",
+    "pandas",
+]
+
+[project.optional-dependencies]
+live = ["mss", "pynput"]
+dev = ["pytest", "pytest-cov", "ruff", "mypy"]
+
+[project.scripts]
+osrs-train = "osrs_rl.training.train:main"
+osrs-eval = "osrs_rl.evaluation.evaluate:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
