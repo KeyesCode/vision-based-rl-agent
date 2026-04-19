@@ -1,0 +1,27 @@
+# Live OSRS evaluation config.
+#
+# SAFETY DEFAULTS:
+#   - enable_live_input defaults to false. Flip ONLY when you have verified the
+#     capture_region + safe_region on your screen and your OSRS client window is
+#     where you expect it to be.
+#   - Kill switch: ``touch /tmp/osrs_rl_stop`` from another terminal to deny every
+#     subsequent action. ``rm`` the file to resume.
+#
+# COORDINATE NOTES (macOS with a standard 1440-wide display):
+#   All coordinates below are absolute screen pixels. Use your OS screenshot tool
+#   to read off the OSRS client's left/top/width/height and the safe click region.
+
+capture_region_xywh: [100, 100, 800, 600]   # OSRS client window rectangle
+safe_region_xywh:    [200, 200, 400, 400]   # region clicks / moves are allowed in
+initial_cursor_xy:   [400, 400]             # must lie inside safe_region
+
+cursor_step_pixels: 25
+action_delay_seconds: 0.3
+
+# --- Safety posture (tighten before enabling live input) ---
+enable_live_input: false     # <<< dry-run until you flip this to true on purpose
+max_actions_per_second: 2.0
+kill_switch_file: /tmp/osrs_rl_stop
+hotkey_drop: ""              # empty => DROP is a no-op in live mode
+
+max_steps: 200               # truncate the live episode after N steps

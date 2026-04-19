@@ -1,0 +1,11 @@
+# Fast live-mode dry-run smoke test (tiny step budget).
+capture_region_xywh: [0, 0, 200, 200]
+safe_region_xywh:    [50, 50, 100, 100]
+initial_cursor_xy:   [100, 100]
+cursor_step_pixels: 10
+action_delay_seconds: 0.01
+enable_live_input: false
+max_actions_per_second: 0.0
+kill_switch_file: /tmp/osrs_rl_stop
+hotkey_drop: ""
+max_steps: 10

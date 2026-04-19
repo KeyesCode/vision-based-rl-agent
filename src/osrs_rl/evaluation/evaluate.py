@@ -22,9 +22,17 @@ import tyro
 
 from osrs_rl.agents.ppo import PPOActorCritic
 from osrs_rl.env.action_space import ActionDecoder, ActionType
+from osrs_rl.env.game_client import GameClient
 from osrs_rl.env.osrs_env import make_env
 from osrs_rl.training.checkpoint import load_checkpoint
-from osrs_rl.utils.config import EnvConfig, RewardConfig, TrainConfig, VisionConfig, load_config
+from osrs_rl.utils.config import (
+    EnvConfig,
+    LiveConfig,
+    RewardConfig,
+    TrainConfig,
+    VisionConfig,
+    load_config,
+)
 from osrs_rl.utils.logging import get_console, setup_logger
 from osrs_rl.utils.seeding import resolve_device, set_seed
 
@@ -49,6 +57,10 @@ class EvalArgs:
     """Torch device for the policy."""
     deterministic: bool = False
     """Use argmax instead of sampling from the policy's action distribution."""
+    live_config: str | None = None
+    """Path to a LiveConfig YAML. When present, evaluation runs against the real OSRS
+    window via LiveOSRSClient. Dry-run by default — set enable_live_input=true in the
+    YAML to actually send mouse/keyboard input."""
 
 
 def _summary(values: list[float] | list[int]) -> dict[str, float]:
@@ -64,12 +76,27 @@ def _summary(values: list[float] | list[int]) -> dict[str, float]:
     }
 
 
-def _build_env(cfg: TrainConfig, seed: int):
-    return make_env(cfg.env, cfg.vision, cfg.reward, seed=seed, idx=0)()
+def _build_env(cfg: TrainConfig, seed: int, client: GameClient | None = None):
+    return make_env(cfg.env, cfg.vision, cfg.reward, seed=seed, idx=0, client=client)()
+
+
+def _build_live_client(cfg: TrainConfig, live_cfg: LiveConfig) -> GameClient:
+    """Construct a LiveOSRSClient and adapt env_cfg so episodes truncate at max_steps."""
+    # Import live-only to keep the core path usable without mss/pynput installed.
+    from osrs_rl.env.live.live_client import LiveOSRSClient
+
+    # Override the env's step budget so live evaluation stops after max_steps.
+    cfg.env.max_episode_steps = live_cfg.max_steps
+    return LiveOSRSClient(cfg.env, live_cfg)
 
 
 def _load_policy(cfg: TrainConfig, checkpoint_path: str, device: torch.device) -> PPOActorCritic:
-    """Build a fresh env temporarily to determine the obs shape, then load weights."""
+    """Build a fresh sim env temporarily to determine the obs shape, then load weights.
+
+    We always probe obs shape against the simulator because the vision wrappers are
+    what determine the policy input shape (grayscale / resize / framestack) — not the
+    raw capture resolution.
+    """
     env = _build_env(cfg, seed=0)
     try:
         obs_shape = env.observation_space.shape  # type: ignore[union-attr]
@@ -93,10 +120,15 @@ def evaluate(
     device: torch.device,
     seed: int = 1000,
     deterministic: bool = False,
+    live_client: GameClient | None = None,
 ) -> dict:
-    """Run ``episodes`` deterministic rollouts and return aggregated metrics."""
+    """Run ``episodes`` rollouts and return aggregated metrics.
+
+    If ``live_client`` is provided, rollouts run against the real OSRS window via
+    :class:`LiveOSRSClient`; otherwise the fast simulator is used.
+    """
     rng = np.random.default_rng(seed)
-    env = _build_env(cfg, seed=seed)
+    env = _build_env(cfg, seed=seed, client=live_client)
 
     returns: list[float] = []
     lengths: list[int] = []
@@ -187,12 +219,26 @@ def main(args: EvalArgs) -> None:
     device = resolve_device(args.device)
 
     cfg = load_config(Path(args.config), TrainConfig)
+
+    live_client: GameClient | None = None
+    live_cfg: LiveConfig | None = None
+    if args.live_config is not None:
+        live_cfg = load_config(Path(args.live_config), LiveConfig)
+        live_client = _build_live_client(cfg, live_cfg)
+        mode = "LIVE" if live_cfg.enable_live_input else "DRY-RUN"
+        _LOG.warning(
+            f"Live mode ({mode}) — capture={live_cfg.capture_region_xywh} "
+            f"safe_region={live_cfg.safe_region_xywh} kill_switch={live_cfg.kill_switch_file}"
+        )
+
     policy: PPOActorCritic | None = None
     label = "random baseline"
     if not args.random:
         assert args.checkpoint is not None
         policy = _load_policy(cfg, args.checkpoint, device)
         label = f"checkpoint: {args.checkpoint}"
+    if live_cfg is not None:
+        label += f" [{'live' if live_cfg.enable_live_input else 'dry-run'}]"
 
     metrics = evaluate(
         cfg,
@@ -201,11 +247,15 @@ def main(args: EvalArgs) -> None:
         device,
         seed=args.seed,
         deterministic=args.deterministic,
+        live_client=live_client,
     )
     metrics["label"] = label
     metrics["checkpoint"] = args.checkpoint
     metrics["config"] = args.config
     metrics["deterministic"] = args.deterministic
+    metrics["live_config"] = args.live_config
+    if live_cfg is not None:
+        metrics["live_mode"] = "live" if live_cfg.enable_live_input else "dry_run"
 
     _print_summary(label, metrics)
 

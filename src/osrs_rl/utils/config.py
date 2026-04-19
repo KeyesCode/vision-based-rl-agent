@@ -83,6 +83,33 @@ class LoggingConfig:
 
 
 @dataclass
+class LiveConfig:
+    """Live OSRS integration — read-only by default, explicit opt-in required for input.
+
+    Coordinates are in absolute screen pixels. ``safe_region_xywh`` is the hard bound
+    that gates every cursor move or click; the kill-switch file is a dead-man's handle
+    (``touch`` the file from another terminal to abort all further live actions).
+    """
+
+    # Screen capture (left, top, width, height).
+    capture_region_xywh: tuple[int, int, int, int] = (100, 100, 800, 600)
+    # Safe bounding box for cursor/click targets (left, top, width, height).
+    safe_region_xywh: tuple[int, int, int, int] = (200, 200, 400, 400)
+    # Starting cursor position (screen coordinates, must lie inside safe_region).
+    initial_cursor_xy: tuple[int, int] = (400, 400)
+    cursor_step_pixels: int = 25
+    action_delay_seconds: float = 0.3
+    # Safety — these all default to the safe, read-only posture.
+    enable_live_input: bool = False
+    max_actions_per_second: float = 2.0
+    kill_switch_file: str = "/tmp/osrs_rl_stop"
+    # Optional hotkey for DROP. Empty string => DROP becomes a no-op in live mode.
+    hotkey_drop: str = ""
+    # Rollout budget for live evaluation (replaces max_episode_steps from the sim).
+    max_steps: int = 200
+
+
+@dataclass
 class TrainConfig:
     """Top-level training configuration."""
 

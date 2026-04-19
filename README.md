@@ -75,16 +75,19 @@ comfortably.
 
 ```
 src/osrs_rl/
-├── env/              # Gymnasium env, GameClient abstraction, 2D simulator
-├── vision/           # frame preprocessing (resize, grayscale, framestack)
+├── env/              # Gymnasium env, GameClient abstraction
+│   ├── simulator/    #   2D grid simulator (training)
+│   └── live/         #   live OSRS client (evaluation)
+├── vision/           # frame preprocessing + screen capture
+├── input_control/    # mouse/keyboard controller + safety gate
 ├── rewards/          # composable reward components
 ├── agents/           # PPO (from scratch) + networks + rollout buffer
 ├── training/         # CLI entry point, trainer, checkpointing
 ├── evaluation/       # evaluation harness and metrics
 └── utils/            # config, logging, seeding
-configs/              # YAML configs (ppo_woodcutting.yaml is the MVP)
-tests/                # env + PPO smoke tests
-scripts/              # analysis + baselines
+configs/              # ppo_woodcutting.yaml (training), live.yaml (live mode)
+tests/                # env / PPO / rewards / wrappers / live smoke tests
+scripts/              # analysis + baselines + checkpoint-progression eval
 ```
 
 ## Results — PPO vs random baseline
@@ -230,6 +233,98 @@ learning a navigation-plus-interact behavior conditioned on current visual state
 - **Custom PPO implementation.** Transparent, hackable, and demonstrable at interview.
   A thin optional `sb3` baseline can be wired up for A/B comparison.
 
+## Live OSRS evaluation
+
+The same Gymnasium env, policy, and checkpoint format drive the real OSRS window
+through a screen-capture + safety-gated input pipeline. Everything flows through the
+existing `GameClient` interface — only the injected client differs between simulator
+and live.
+
+```
+┌────────────┐   frames    ┌────────────┐   action    ┌────────────────┐
+│ OSRS client│ ──────────▶ │ LiveOSRSClient │ ──▶ SafetyGate ──▶│ MouseKeyboardCtrl │
+│  (game)    │   (mss)     │  (GameClient) │              │ (pynput)          │
+└────────────┘             └────────────┘               └────────────────┘
+      ▲                           │                              │ (blocked in
+      │                           ▼                              │  dry-run mode)
+      │                    Gymnasium env ──▶ PPO policy          │
+      └──────────────────  cursor move / click  ─────────────────┘
+```
+
+### Install the live extra
+
+```bash
+pip install -e ".[live]"       # adds mss + pynput
+```
+
+On macOS, running live input additionally requires Screen Recording and Accessibility
+permissions for your terminal. Grant them in `System Settings → Privacy & Security`.
+
+### Safety layer (`SafetyGate`)
+
+Every OS-level side effect — cursor move, click, keypress — passes through a single
+`SafetyGate.approve` call. The gate enforces, in order:
+
+1. **`enable_live_input` must be `true`.** Default is `false`, which means every
+   action is *audit-logged but blocked at dispatch*. This lets you rehearse the whole
+   stack against the live game with zero input side effects.
+2. **Kill-switch file.** While the path exists, every subsequent approve is denied.
+   Default `/tmp/osrs_rl_stop` — from another terminal, run `touch /tmp/osrs_rl_stop`
+   to halt, `rm` to resume.
+3. **Rate limit** (`max_actions_per_second`).
+4. **Safe bounding box** (`safe_region_xywh`). Clicks or cursor moves whose target
+   falls outside the bbox are denied. This is the single most important setting —
+   make sure the box covers **only the area of the OSRS client you're comfortable
+   having the agent click inside.**
+5. **Audit log** on every attempted action (approved or denied), visible in the
+   console and in the run log.
+
+### Dry-run evaluation (safe default)
+
+No input is ever sent. Use this to verify capture region, policy behavior, and the
+audit log before flipping the live flag.
+
+```bash
+# 1. Edit configs/live.yaml: set capture_region_xywh and safe_region_xywh to match
+#    your OSRS client window.
+# 2. Run the trained checkpoint in dry-run mode.
+osrs-eval \
+    --checkpoint runs/ppo_woodcutting_v2/checkpoints/latest.pt \
+    --live-config configs/live.yaml \
+    --episodes 1
+```
+
+The console will print each approved action with a `[DRY]` prefix and the cursor
+coordinates it *would have* moved to.
+
+### Real-input evaluation (explicit opt-in)
+
+After you have verified the capture region and audit log:
+
+```bash
+# In configs/live.yaml, set:  enable_live_input: true
+# Prepare the kill switch in a second terminal (do not run the command yet):
+#     touch /tmp/osrs_rl_stop       # emergency halt
+#     rm    /tmp/osrs_rl_stop       # resume
+osrs-eval \
+    --checkpoint runs/ppo_woodcutting_v2/checkpoints/latest.pt \
+    --live-config configs/live.yaml \
+    --episodes 1
+```
+
+### What to expect from a sim-trained policy on real OSRS
+
+Candidly: **don't expect woodcutting**. The policy was trained on 128×128 synthetic
+frames whose pixel statistics (solid-color tiles, HUD bar) share almost nothing with
+the real OSRS client. You will see the cursor make valid-shaped motions (bounded
+inside the safe region, paced by the rate limit) and click occasionally, but there
+is no reason for the policy to choose "click on a tree" reliably.
+
+M5 is the **infrastructure milestone**, not the sim-to-real-success milestone —
+closing the visual-domain gap is a dedicated training problem (domain randomization,
+OSRS-frame fine-tuning, CV-based action decoding) that belongs in a separate
+milestone.
+
 ## Roadmap
 
 - [x] Scaffolding, action/reward abstractions
@@ -239,8 +334,8 @@ learning a navigation-plus-interact behavior conditioned on current visual state
 - [x] Smoke tests for env and PPO
 - [x] Evaluation harness + charts (reward / ep-length / success rate / action distribution)
 - [x] Random-agent baseline + trained-agent comparison
-- [ ] Live OSRS client (screen capture + input) with safety gates
-- [ ] Sim-to-real evaluation of sim-trained policies
+- [x] Live OSRS client (screen capture + input) with safety gates + dry-run mode
+- [ ] Closing the sim-to-real visual gap (domain randomization / OSRS fine-tuning)
 - [ ] DQN baseline behind the same `BasePolicy` interface
 
 ## License
