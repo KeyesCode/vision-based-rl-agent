@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from osrs_rl.env.action_space import ActionDecoder, ActionType
+from osrs_rl.env.action_space import ActionType
 from osrs_rl.env.osrs_env import OSRSEnv
 from osrs_rl.env.wrappers import EpisodeStatsWrapper
 from osrs_rl.rewards.components import build_reward

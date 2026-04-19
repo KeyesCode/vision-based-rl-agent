@@ -50,11 +50,14 @@ class SafetyGate:
                 self._deny(desc, target_xy, reason="rate limit")
                 self._denied_rate += 1
                 return False
-        if target_xy is not None and self.cfg.safe_region_xywh is not None:
-            if not self._in_safe_region(target_xy):
-                self._deny(desc, target_xy, reason="outside safe region")
-                self._denied_region += 1
-                return False
+        if (
+            target_xy is not None
+            and self.cfg.safe_region_xywh is not None
+            and not self._in_safe_region(target_xy)
+        ):
+            self._deny(desc, target_xy, reason="outside safe region")
+            self._denied_region += 1
+            return False
         self._approve(desc, target_xy)
         self._last_action_t = time.monotonic()
         return True
@@ -65,8 +68,8 @@ class SafetyGate:
     def _in_safe_region(self, xy: tuple[int, int]) -> bool:
         assert self.cfg.safe_region_xywh is not None
         x, y = xy
-        l, t, w, h = self.cfg.safe_region_xywh
-        return l <= x < l + w and t <= y < t + h
+        left, top, width, height = self.cfg.safe_region_xywh
+        return left <= x < left + width and top <= y < top + height
 
     def _approve(self, desc: str, target_xy: tuple[int, int] | None) -> None:
         self._approved += 1

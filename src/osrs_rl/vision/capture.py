@@ -8,6 +8,7 @@ can be installed without it.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
 import cv2
@@ -53,7 +54,5 @@ class ScreenCapture:
         return cv2.cvtColor(arr, cv2.COLOR_BGRA2RGB)
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self._mss.close()
-        except Exception:  # pragma: no cover
-            pass

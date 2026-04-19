@@ -26,11 +26,8 @@ from osrs_rl.env.game_client import GameClient
 from osrs_rl.env.osrs_env import make_env
 from osrs_rl.training.checkpoint import load_checkpoint
 from osrs_rl.utils.config import (
-    EnvConfig,
     LiveConfig,
-    RewardConfig,
     TrainConfig,
-    VisionConfig,
     load_config,
 )
 from osrs_rl.utils.logging import get_console, setup_logger

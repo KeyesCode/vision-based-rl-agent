@@ -48,7 +48,7 @@ class Series:
     values: np.ndarray
 
     @classmethod
-    def empty(cls) -> "Series":
+    def empty(cls) -> Series:
         return cls(np.array([]), np.array([]))
 
     def is_empty(self) -> bool:
@@ -166,6 +166,7 @@ def plot_losses(scalars: dict[str, Series], output: Path) -> None:
             ("losses/value_loss", "value loss"),
             ("losses/entropy", "policy entropy"),
         ],
+        strict=True,
     ):
         series = scalars.get(tag, Series.empty())
         _plot_line(ax, series, title, color="tab:purple")
