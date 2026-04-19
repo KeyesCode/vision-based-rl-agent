@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-04-18
+
+Inference-time action masking — the minimum-sufficient fix for the argmax
+collapse diagnosed across the preceding four ablations. Caps the project's
+research trajectory with a five-stage capstone chart.
+
 ### Added
 
 - **Inference-time action masking.** Optional `mask` parameter on
