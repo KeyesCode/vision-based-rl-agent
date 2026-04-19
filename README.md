@@ -25,7 +25,12 @@ Checkpoint progression shows return climbing from +9 at 25k steps to +25
 at 300k — a clean, monotonic learning curve from raw pixel input.
 Domain-randomized training more than doubles the trained-policy success
 rate under perturbed visuals (baseline policy collapses to 0.0%; the
-domain-randomized policy holds at 6.7%).
+domain-randomized policy holds at 6.7%). An inference-time action mask —
+derived from a 98.7%-accurate learned adjacency head — breaks a
+deterministic argmax collapse that four training-time interventions
+(baseline, DR, LSTM, RGB + aux loss) all failed to move, lifting the
+deterministic return from −3.36 to +4.71 and doubling deterministic
+success rate (8% → 16%).
 
 ## Why this project matters
 

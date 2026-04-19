@@ -6,6 +6,35 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Inference-time action masking.** Optional `mask` parameter on
+  `PPOActorCritic.act` and `RecurrentPPOActorCritic.act` sets masked logits
+  to `−1e8` before the Categorical distribution. `build_adjacency_mask` in
+  `env.action_space` produces a length-7 mask that suppresses INTERACT when
+  the agent is not adjacent to a live tree. Default `mask=None` is a pure
+  no-op so every pre-M10 ablation path is unchanged and still reproducible.
+- **`--action-mask` CLI flag on `osrs-eval`** threads the adjacency label
+  out of `info["adjacent_to_tree"]` and builds a per-step mask for the
+  policy. Inference-only; the checkpoint is not modified or retrained.
+- **`scripts/compare_final.py`** — 5-stage capstone comparison chart
+  (baseline → DR → LSTM → representation → + masking).
+- **`docs/results/system_evolution.png`** — committed result asset.
+- **`tests/test_action_masking.py`** — 5 tests: mask helper correctness,
+  feedforward mask forces non-INTERACT argmax, mask is a no-op when all
+  actions are allowed, recurrent path enforces the same semantics.
+
+### Findings
+
+- **Inference-time action masking** broke a deterministic argmax collapse
+  that the preceding four training-time interventions (baseline, DR, LSTM,
+  representation) had all landed at identically (−3.36 return, 100%
+  INTERACT share at argmax). Masking lifted deterministic return to +4.71,
+  doubled deterministic success rate (8% → 16%), and pushed INTERACT share
+  from 100% to 0.8% — all without any retraining or additional parameters.
+  The 5-stage capstone chart in TECHNICAL_REPORT.md is the canonical
+  artifact of the project's full research trajectory.
+
 ## [0.4.0] — 2026-04-18
 
 Representation attack — RGB 128×128 input plus an adjacency auxiliary loss on

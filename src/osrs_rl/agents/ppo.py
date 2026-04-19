@@ -24,6 +24,18 @@ from osrs_rl.agents.rollout_buffer import RecurrentRolloutBuffer, RolloutBuffer
 from osrs_rl.utils.config import PPOConfig
 
 
+def _apply_action_mask(logits: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    """Set masked logits to a large negative constant before the Categorical softmax.
+
+    Using ``-1e8`` (rather than ``-inf``) keeps gradients and ``log_prob`` well-defined
+    even under unusual upstream conditions, while still driving the softmax weight on
+    masked actions below floating-point precision.
+    """
+    if mask is None:
+        return logits
+    return logits.masked_fill(mask == 0, -1e8)
+
+
 class PPOActorCritic(nn.Module, BasePolicy):
     """Shared-backbone actor-critic for discrete action spaces.
 
@@ -56,10 +68,16 @@ class PPOActorCritic(nn.Module, BasePolicy):
         return self.critic(self._features(obs)).squeeze(-1)
 
     def act(
-        self, obs: torch.Tensor, deterministic: bool = False
+        self,
+        obs: torch.Tensor,
+        deterministic: bool = False,
+        mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Select actions. ``mask`` is an optional ``(B, num_actions)`` 0/1 tensor
+        applied to the raw logits; masked entries are suppressed before sampling
+        or argmax. ``mask=None`` is a pure no-op."""
         feat = self._features(obs)
-        logits = self.actor(feat)
+        logits = _apply_action_mask(self.actor(feat), mask)
         dist = Categorical(logits=logits)
         action = dist.probs.argmax(dim=-1) if deterministic else dist.sample()
         return action, dist.log_prob(action), self.critic(feat).squeeze(-1)
@@ -275,9 +293,12 @@ class RecurrentPPOActorCritic(nn.Module, RecurrentPolicy):
         hidden: RecurrentState,
         episode_starts: torch.Tensor,
         deterministic: bool = False,
+        mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, RecurrentState]:
+        """Same action-masking contract as the feedforward policy — masked logits
+        are set to a large negative constant before sampling / argmax."""
         out, new_hidden = self._step(obs, hidden, episode_starts)
-        logits = self.actor(out)
+        logits = _apply_action_mask(self.actor(out), mask)
         dist = Categorical(logits=logits)
         action = dist.probs.argmax(dim=-1) if deterministic else dist.sample()
         value = self.critic(out).squeeze(-1)

@@ -23,8 +23,9 @@ Contents:
 8. [Domain randomization (sim-to-real preparation)](#domain-randomization-sim-to-real-preparation)
 9. [Recurrent policy (LSTM) — a hypothesis, rigorously falsified](#recurrent-policy-lstm--a-hypothesis-rigorously-falsified)
 10. [Representation attack — RGB 128×128 + adjacency auxiliary loss](#representation-attack--rgb-128128--adjacency-auxiliary-loss)
-11. [Next steps: sim-to-real](#next-steps-sim-to-real)
-12. [Roadmap](#roadmap)
+11. [Action masking — the inference-time fix](#action-masking--the-inference-time-fix)
+12. [Next steps: sim-to-real](#next-steps-sim-to-real)
+13. [Roadmap](#roadmap)
 
 ![architecture](docs/architecture.png)
 
@@ -532,25 +533,145 @@ python scripts/compare_representation.py \
     --output docs/results/representation_vs_baseline.png
 ```
 
+## Action masking — the inference-time fix
+
+The M9 analysis localized the remaining failure to the actor head's marginal
+preference for INTERACT: INTERACT has the highest unconditional expected
+return (+5 per chop, −0.02 when invalid), so the actor's argmax picks
+INTERACT in every state even though the CNN features now encode adjacency at
+98.7% linear-probe accuracy. M10 targets this pathology directly, at
+inference time, without any retraining.
+
+### The mask
+
+One boolean input — "is the agent adjacent to a live tree?" — drives a
+length-7 action mask. When the agent is not adjacent, the INTERACT logit is
+set to `−1e8` before the Categorical distribution is built. Every other
+action (four MOVEs, DROP, IDLE) is left unmasked.
+
+```python
+def build_adjacency_mask(adjacent_to_tree: bool, num_actions: int = 7) -> list[float]:
+    mask = [1.0] * num_actions
+    if not adjacent_to_tree:
+        mask[int(ActionType.INTERACT)] = 0.0
+    return mask
+```
+
+The mask is threaded into both `PPOActorCritic.act` and
+`RecurrentPPOActorCritic.act` as an optional `mask` parameter. Passing
+`mask=None` is a pure no-op, so every pre-M10 ablation path is unaffected
+and still reproducible.
+
+**Source of the adjacency signal.** For this milestone we use the
+ground-truth label out of `info["adjacent_to_tree"]` — the cleanest possible
+signal for isolating the question "does masking fix the failure?" from the
+question "does the learned aux head generalize?" The aux head is already
+trained to 98.7% accuracy, so the live path (where no ground truth exists)
+can use the learned signal directly with minimal accuracy loss; that
+migration is a small change to `evaluate.py` and is the natural live-mode
+follow-up.
+
+**Training stays untouched.** The whole value of this milestone is that a
+tiny inference-time change fixes a training-time pathology without any
+re-training. Any training-time masking would be a separate experiment.
+
+### Experiment: masking on the M9 checkpoint
+
+50 evaluation episodes of the representation-upgrade (`repr`) checkpoint,
+both stochastic and deterministic, with and without the mask.
+
+| metric | no mask (M9) | **+ mask** | delta |
+|---|---|---|---|
+| stochastic return | +16.92 | **+26.70** | **+9.8 pts** |
+| stochastic success rate | 10.0% | **22.0%** | **+12 pp (2.2×)** |
+| stochastic trees / episode | 3.72 | **4.84** | +30% |
+| **deterministic return** | **−3.36** | **+4.71** | **+8.1 pts** |
+| **deterministic success rate** | **8.0%** | **16.0%** | **+8 pp (2×)** |
+| deterministic trees / episode | 0.80 | **2.02** | 2.5× |
+| deterministic INTERACT share | 100% | **0.8%** | argmax collapse broken |
+
+The INTERACT-share row is the smoking gun. Without the mask, the argmax
+policy picks INTERACT on **every single step** (100%). With the mask the
+argmax falls through to whatever logit is second-highest in the non-INTERACT
+slots, and that turns out to be a MOVE action in roughly 99% of states.
+INTERACT is still chosen 0.8% of the time — exactly the states the mask
+*allowed* it, i.e. when adjacent, which is exactly what a well-trained
+policy should have done all along.
+
+### The full-system capstone — five stages of evolution
+
+![system evolution](docs/results/system_evolution.png)
+
+| stage | deterministic return | success rate | INTERACT share |
+|---|---|---|---|
+| baseline (feedforward) | −3.36 | 8.0% | 100% |
+| + domain randomization | −3.36 | 8.0% | 100% |
+| + recurrent policy (LSTM) | −3.36 | 8.0% | 100% |
+| + representation upgrade (RGB 128 + aux loss) | −3.36 | 8.0% | 100% |
+| **+ action masking** | **+4.71** | **16.0%** | **0.8%** |
+
+Four training-time interventions — each technically successful at its stated
+goal (DR improved robustness, LSTM's hidden state reset correctly, aux head
+hit 98.7% accuracy) — produced the *identical* deterministic trajectory.
+Every argmax trace picked INTERACT at step 0, and since the env dynamics are
+seed-deterministic, every subsequent state and reward was bit-identical
+across the four checkpoints.
+
+Only the inference-time mask — which costs nothing to add, no additional
+training, no additional parameters, and which only touches the argmax path
+— moved the metric. That is the research conclusion the project earned
+through the preceding four ablations, and the reason those ablations were
+worth documenting honestly as they were: without them, masking looks like a
+hack. With them, masking is the precise, minimum-sufficient fix to the
+exact pathology three independent experiments all implicated.
+
+### Reproduce
+
+```bash
+# Evaluate the M9 checkpoint with and without the mask
+osrs-eval --checkpoint runs/ppo_woodcutting_repr/checkpoints/latest.pt \
+          --config configs/ppo_woodcutting_repr.yaml --episodes 50 --deterministic \
+          --action-mask \
+          --output runs/ppo_woodcutting_repr/eval_trained_det_masked.json
+
+osrs-eval --checkpoint runs/ppo_woodcutting_repr/checkpoints/latest.pt \
+          --config configs/ppo_woodcutting_repr.yaml --episodes 50 \
+          --action-mask \
+          --output runs/ppo_woodcutting_repr/eval_trained_masked.json
+
+# Five-stage capstone chart
+python scripts/compare_final.py \
+    --baseline-det runs/ppo_woodcutting_v2/eval_trained_det.json \
+    --dr-det       runs/ppo_woodcutting_dr/eval_trained_det.json \
+    --lstm-det     runs/ppo_woodcutting_lstm/eval_trained_det.json \
+    --repr-det     runs/ppo_woodcutting_repr/eval_trained_det.json \
+    --masked-det   runs/ppo_woodcutting_repr/eval_trained_det_masked.json \
+    --output docs/results/system_evolution.png
+```
+
 ## Next steps: sim-to-real
 
-The M8 + M9 ablations together localize the remaining bottleneck to the actor
-head, not the encoder or the policy memory. Sim-to-real levers in priority
-order:
+M10 shipped the crispest remaining lever — inference-time action masking —
+using the ground-truth adjacency signal. The next wave of work migrates the
+mask's signal source from ground truth to the learned aux head and pushes
+the whole pipeline onto real OSRS frames, in priority order:
 
-1. **Action masking / value-function guard on INTERACT.** Use the (now-accurate)
-   aux head at inference time to set INTERACT's logit to `−∞` in states the
-   model predicts as "not adjacent". Directly breaks the argmax collapse — no
-   more training required.
+1. **Switch mask source from ground truth to aux-head prediction.** Small
+   change in `evaluate.py`: instead of reading `info["adjacent_to_tree"]`,
+   query `policy.aux_head` on the current obs. The head is 98.7% accurate
+   on simulator frames; confirm on the DR-randomized frames first, then on
+   real OSRS frames. This is what turns the mask into a sim-to-real tool.
 2. **Real-frame fine-tuning of the aux head.** Collect a few hundred labeled
-   OSRS screenshots and re-train only the aux-head + CNN backbone on them.
-   Makes the "adjacent" prediction robust on real pixels so live-mode action
-   masking becomes reliable.
-3. **Harder distractor clutter.** Add distractors shaped like trees-with-wrong-color
-   and trees-with-wrong-size to force the CNN to use shape features, not just color.
-4. **CV-based action decoder.** Instead of a naive virtual cursor, have the live
-   client detect tree pixels and expose a "click nearest tree" macro as an action —
-   the policy then only has to choose _when_, not _where_.
+   OSRS screenshots and re-train only the aux head + CNN backbone on them
+   with the same BCE loss. Closes the sim-to-real feature gap for adjacency
+   specifically, making the inference-time mask reliable on live frames.
+3. **Harder distractor clutter.** Add distractors shaped like
+   trees-with-wrong-color and trees-with-wrong-size so the aux head has to
+   use shape features, not just color, making it more robust to real OSRS
+   variation.
+4. **CV-based action decoder.** Instead of a naive virtual cursor, have the
+   live client detect tree pixels and expose a "click nearest tree" macro
+   as an action — the policy then only has to choose _when_, not _where_.
 
 ## Roadmap
 
@@ -561,7 +682,8 @@ order:
 - [x] Domain randomization (palette / HUD / clutter / per-frame noise) + robustness ablation
 - [x] Recurrent PPO (LSTM) — tested; falsified the "memory bottleneck" hypothesis
 - [x] Representation attack (RGB 128×128 + adjacency aux loss) — aux head hit 98.7% accuracy, stochastic success 4% → 10%, argmax collapse persists
-- [ ] Action masking using the aux head at inference time (breaks argmax collapse)
+- [x] Action masking using the adjacency signal at inference time — deterministic return −3.36 → +4.71, success 8% → 16%, INTERACT share 100% → 0.8%
+- [ ] Switch masking's adjacency source from ground truth to the learned aux head for live-mode evaluation
 - [ ] DQN baseline behind the same `BasePolicy` interface
 - [ ] Second task (combat? mining?) as generalization test
 

@@ -21,7 +21,7 @@ import torch
 import tyro
 
 from osrs_rl.agents.ppo import PPOActorCritic, RecurrentPPOActorCritic
-from osrs_rl.env.action_space import ActionDecoder, ActionType
+from osrs_rl.env.action_space import ActionDecoder, ActionType, build_adjacency_mask
 from osrs_rl.env.game_client import GameClient
 from osrs_rl.env.osrs_env import make_env
 from osrs_rl.training.checkpoint import load_checkpoint
@@ -58,6 +58,10 @@ class EvalArgs:
     """Path to a LiveConfig YAML. When present, evaluation runs against the real OSRS
     window via LiveOSRSClient. Dry-run by default — set enable_live_input=true in the
     YAML to actually send mouse/keyboard input."""
+    action_mask: bool = False
+    """If true, mask the INTERACT action's logit in non-adjacent states using the
+    ground-truth adjacency label from ``info['adjacent_to_tree']``. Inference-only;
+    the loaded checkpoint is not modified or retrained."""
 
 
 def _summary(values: list[float] | list[int]) -> dict[str, float]:
@@ -137,6 +141,7 @@ def evaluate(
     seed: int = 1000,
     deterministic: bool = False,
     live_client: GameClient | None = None,
+    action_mask: bool = False,
 ) -> dict:
     """Run ``episodes`` rollouts and return aggregated metrics.
 
@@ -157,30 +162,42 @@ def evaluate(
     is_recurrent = isinstance(policy, RecurrentPPOActorCritic)
 
     for ep in range(episodes):
-        obs, _ = env.reset(seed=seed + ep)
+        obs, reset_info = env.reset(seed=seed + ep)
         total_r = 0.0
         steps = 0
         terminated = truncated = False
         last_info: dict = {}
         # Recurrent policies reset their hidden state at every episode boundary.
         hidden = policy.initial_hidden(1, device) if is_recurrent else None
+        # Track adjacency for the current observation so we can mask INTERACT.
+        last_adjacent = int(reset_info.get("adjacent_to_tree", 0))
         while not (terminated or truncated):
             if policy is None:
                 action = int(rng.integers(0, ActionDecoder.n_actions()))
             else:
                 obs_t = torch.as_tensor(obs, device=device).unsqueeze(0)
+                mask_t: torch.Tensor | None = None
+                if action_mask:
+                    mask_t = torch.as_tensor(
+                        build_adjacency_mask(bool(last_adjacent)),
+                        dtype=torch.float32,
+                        device=device,
+                    ).unsqueeze(0)
                 if is_recurrent:
                     start = torch.tensor([1.0 if steps == 0 else 0.0], device=device)
                     a, _, _, hidden = policy.act(  # type: ignore[misc]
-                        obs_t, hidden, start, deterministic=deterministic
+                        obs_t, hidden, start, deterministic=deterministic, mask=mask_t
                     )
                 else:
-                    a, _, _ = policy.act(obs_t, deterministic=deterministic)
+                    a, _, _ = policy.act(
+                        obs_t, deterministic=deterministic, mask=mask_t
+                    )
                 action = int(a.item())
             obs, r, terminated, truncated, info = env.step(action)
             total_r += float(r)
             steps += 1
             last_info = info
+            last_adjacent = int(info.get("adjacent_to_tree", last_adjacent))
 
         returns.append(total_r)
         lengths.append(steps)
@@ -274,11 +291,13 @@ def main(args: EvalArgs) -> None:
         seed=args.seed,
         deterministic=args.deterministic,
         live_client=live_client,
+        action_mask=args.action_mask,
     )
     metrics["label"] = label
     metrics["checkpoint"] = args.checkpoint
     metrics["config"] = args.config
     metrics["deterministic"] = args.deterministic
+    metrics["action_mask"] = args.action_mask
     metrics["live_config"] = args.live_config
     if live_cfg is not None:
         metrics["live_mode"] = "live" if live_cfg.enable_live_input else "dry_run"
