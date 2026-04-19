@@ -10,8 +10,8 @@ env:
   num_trees: 6
   max_inventory: 10          # smaller than OSRS's 28 so episodes complete in ~100-200 steps
   max_episode_steps: 300
-  chop_ticks: 3
-  tree_respawn_ticks: 20
+  chop_ticks: 1              # one valid INTERACT yields a log; easier for PPO to discover
+  tree_respawn_ticks: 10
 
 vision:
   resize_to: 84
@@ -19,10 +19,12 @@ vision:
   frame_stack: 4
 
 reward:
-  log_collected: 1.0
+  log_collected: 5.0           # dominant signal — chopping is by far the best thing to do
   step_penalty: -0.01
-  invalid_action_penalty: -0.1
-  distance_shaping: 0.05
+  invalid_action_penalty: -0.02  # light so exploration isn't suppressed
+  idle_penalty: -0.05
+  distance_shaping: 0.1
+  adjacency_bonus: 0.5         # teaches "navigate to a tree" as an explicit sub-goal
   full_inventory_bonus: 10.0
 
 ppo:
@@ -33,7 +35,6 @@ ppo:
   num_minibatches: 4
   clip_coef: 0.2
   vf_coef: 0.5
-  ent_coef: 0.01
   gamma: 0.99
   gae_lambda: 0.95
   learning_rate: 0.00025
@@ -42,9 +43,10 @@ ppo:
   target_kl: null
   norm_adv: true
   clip_vloss: true
+  ent_coef: 0.01
 
 logging:
-  run_name: ppo_woodcutting
+  run_name: ppo_woodcutting_v2
   log_dir: runs
   log_interval_updates: 1
   checkpoint_interval_updates: 25

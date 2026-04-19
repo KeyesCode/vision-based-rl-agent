@@ -64,6 +64,10 @@ class Trainer:
 
         self._episode_returns: deque[float] = deque(maxlen=100)
         self._episode_lengths: deque[int] = deque(maxlen=100)
+        self._episode_success: deque[float] = deque(maxlen=100)
+        self._episode_trees: deque[float] = deque(maxlen=100)
+        self._episode_invalid: deque[float] = deque(maxlen=100)
+        self._episode_idle: deque[float] = deque(maxlen=100)
 
     # ----------------------------------------------------------------- env builders
 
@@ -154,6 +158,7 @@ class Trainer:
     # ----------------------------------------------------------------- helpers
 
     def _record_episode_stats(self, infos: dict) -> None:
+        """Capture per-episode return/length/success from batched vector-env infos."""
         # Batched form (gymnasium >=0.29 default for SyncVectorEnv).
         if "episode" in infos:
             ep = infos["episode"]
@@ -162,6 +167,7 @@ class Trainer:
             mask = np.asarray(
                 infos.get("_episode", np.ones_like(r, dtype=bool)), dtype=bool
             )
+            self._capture_task_metrics(infos, mask)
             for i in range(len(mask)):
                 if bool(mask[i]):
                     self._episode_returns.append(float(r[i]))
@@ -173,6 +179,30 @@ class Trainer:
                 if info and "episode" in info:
                     self._episode_returns.append(float(info["episode"]["r"]))
                     self._episode_lengths.append(int(info["episode"]["l"]))
+                    if "episode_success" in info:
+                        self._episode_success.append(float(info["episode_success"]))
+                        self._episode_trees.append(float(info["episode_trees_chopped"]))
+                        self._episode_invalid.append(float(info["episode_invalid_ratio"]))
+                        self._episode_idle.append(float(info["episode_idle_ratio"]))
+
+    def _capture_task_metrics(self, infos: dict, mask: np.ndarray) -> None:
+        """Pull EpisodeStatsWrapper fields out of a batched info dict."""
+        keys = (
+            ("episode_success", self._episode_success, float),
+            ("episode_trees_chopped", self._episode_trees, float),
+            ("episode_invalid_ratio", self._episode_invalid, float),
+            ("episode_idle_ratio", self._episode_idle, float),
+        )
+        for key, buffer, cast in keys:
+            if key not in infos:
+                continue
+            values = np.asarray(infos[key])
+            # Each stats field has a companion "_<key>" mask when it's vector-batched.
+            per_field_mask = infos.get(f"_{key}")
+            combined = mask if per_field_mask is None else np.asarray(per_field_mask, dtype=bool)
+            for i in range(len(combined)):
+                if bool(combined[i]):
+                    buffer.append(cast(values[i]))
 
     def _log_metrics(
         self, update: int, global_step: int, metrics, sps: int
@@ -192,9 +222,23 @@ class Trainer:
             mean_l = float(np.mean(self._episode_lengths))
             w.add_scalar("charts/episode_return", mean_r, global_step)
             w.add_scalar("charts/episode_length", mean_l, global_step)
+            extras = ""
+            if self._episode_success:
+                success = float(np.mean(self._episode_success))
+                trees = float(np.mean(self._episode_trees))
+                invalid = float(np.mean(self._episode_invalid))
+                idle = float(np.mean(self._episode_idle))
+                w.add_scalar("charts/success_rate", success, global_step)
+                w.add_scalar("charts/trees_chopped", trees, global_step)
+                w.add_scalar("charts/invalid_action_ratio", invalid, global_step)
+                w.add_scalar("charts/idle_ratio", idle, global_step)
+                extras = (
+                    f" success={success:.2f} trees={trees:.1f} "
+                    f"invalid={invalid:.2f} idle={idle:.2f}"
+                )
             _LOG.info(
                 f"upd={update} step={global_step:,} "
-                f"ep_ret={mean_r:+.2f} ep_len={mean_l:.0f} "
+                f"ep_ret={mean_r:+.2f} ep_len={mean_l:.0f}{extras} "
                 f"sps={sps} pi_loss={metrics.policy_loss:+.3f} "
                 f"v_loss={metrics.value_loss:.3f} ent={metrics.entropy:.3f} "
                 f"kl={metrics.approx_kl:.4f}"

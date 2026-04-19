@@ -32,7 +32,7 @@ dev = ["pytest", "pytest-cov", "ruff", "mypy"]
 
 [project.scripts]
 osrs-train = "osrs_rl.training.train:main"
-osrs-eval = "osrs_rl.evaluation.evaluate:main"
+osrs-eval = "osrs_rl.evaluation.evaluate:entrypoint"
 
 [tool.setuptools.packages.find]
 where = ["src"]

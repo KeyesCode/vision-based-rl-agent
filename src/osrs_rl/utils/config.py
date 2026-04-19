@@ -44,7 +44,9 @@ class RewardConfig:
     log_collected: float = 1.0
     step_penalty: float = -0.01
     invalid_action_penalty: float = -0.1
-    distance_shaping: float = 0.05
+    idle_penalty: float = -0.05  # prevents the "spam IDLE" local optimum
+    distance_shaping: float = 0.1
+    adjacency_bonus: float = 0.5  # fires the step agent becomes adjacent to a live tree
     full_inventory_bonus: float = 10.0
 
 
